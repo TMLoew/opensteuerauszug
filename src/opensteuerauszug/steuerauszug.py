@@ -27,6 +27,8 @@ from .importers.ibkr.ibkr_importer import IbkrImporter # Added IbkrImporter
 from .core.exchange_rate_provider import ExchangeRateProvider
 from .core.kursliste_manager import KurslisteManager
 from .core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
+from .core.flag_override_provider import FlagOverrideProvider
+from .core.manual_price_provider import ManualPriceProvider
 from .config import ConfigManager, ConcreteAccountSettings
 
 logger = logging.getLogger(__name__)
@@ -383,7 +385,34 @@ def main(
                 print(f"Successfully loaded {len(security_identifier_map)} security identifiers.")
             else:
                 print("Security identifier map not loaded or empty. Enrichment will be skipped.")
-            
+
+            # Initialize FlagOverrideProvider to handle Kursliste sign overrides
+            flag_override_provider = None
+            try:
+                flag_override_provider = FlagOverrideProvider(
+                    config_path=str(config_file),
+                    identifiers_path=str(effective_identifiers_csv_path)
+                )
+                print("FlagOverrideProvider initialized successfully.")
+            except Exception as e:
+                print(f"Warning: Could not initialize FlagOverrideProvider: {e}")
+
+            # Initialize ManualPriceProvider to handle manual price overrides
+            manual_price_provider = None
+            # Compute manual prices CSV path in the data directory
+            cli_py_file_path = os.path.abspath(__file__)
+            src_opensteuerauszug_dir = os.path.dirname(cli_py_file_path)
+            src_dir = os.path.dirname(src_opensteuerauszug_dir)
+            project_root_dir = os.path.dirname(src_dir)
+            manual_prices_csv_path = os.path.join(project_root_dir, "data", "manual_prices.csv")
+            try:
+                manual_price_provider = ManualPriceProvider(
+                    csv_path=manual_prices_csv_path
+                )
+                print("ManualPriceProvider initialized successfully.")
+            except Exception as e:
+                print(f"Warning: Could not initialize ManualPriceProvider: {e}")
+
             print("Running CleanupCalculator...")
             cleanup_calculator = CleanupCalculator(
                 period_from=parsed_period_from,
@@ -423,11 +452,11 @@ def main(
             elif tax_calculation_level == TaxCalculationLevel.KURSLISTE:
                 print("Running KurslisteTaxValueCalculator...")
                 calculator_name = "KurslisteTaxValueCalculator"
-                tax_value_calculator = KurslisteTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_calculator = KurslisteTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, flag_override_provider=flag_override_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
             elif tax_calculation_level == TaxCalculationLevel.FILL_IN:
                 print("Running FillInTaxValueCalculator...")
                 calculator_name = "FillInTaxValueCalculator"
-                tax_value_calculator = FillInTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_calculator = FillInTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, flag_override_provider=flag_override_provider, manual_price_provider=manual_price_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
             
             if tax_value_calculator and calculator_name:
                 statement = tax_value_calculator.calculate(statement)
@@ -481,10 +510,10 @@ def main(
                 tax_value_verifier = MinimalTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
             elif tax_calculation_level == TaxCalculationLevel.KURSLISTE:
                 verifier_name = "KurslisteTaxValueCalculator"
-                tax_value_verifier = KurslisteTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_verifier = KurslisteTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, flag_override_provider=flag_override_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
             elif tax_calculation_level == TaxCalculationLevel.FILL_IN:
                 verifier_name = "FillInTaxValueCalculator"
-                tax_value_verifier = FillInTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_verifier = FillInTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, flag_override_provider=flag_override_provider, manual_price_provider=manual_price_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
 
             if tax_value_verifier and verifier_name:
                 print(f"Running {verifier_name} (Verify Mode)...")
