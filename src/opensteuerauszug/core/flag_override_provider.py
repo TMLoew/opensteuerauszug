@@ -1,6 +1,15 @@
-import configparser
 import csv
+import sys
 from typing import Dict, Optional
+
+# Use tomllib for Python 3.11+ or tomli for older versions
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        import tomli as tomllib
 
 
 class FlagOverrideProvider:
@@ -36,11 +45,13 @@ class FlagOverrideProvider:
     def _load_from_config(self, file_path: str):
         """Loads flag overrides from the config.toml file."""
         try:
-            config = configparser.ConfigParser()
-            config.read(file_path)
+            with open(file_path, 'rb') as f:
+                config = tomllib.load(f)
+
             if 'overrides' in config:
                 for isin, flag in config['overrides'].items():
-                    self._overrides[isin.upper().strip('"')] = flag.strip('"')
+                    # ISIN keys should be uppercase, flags should be stripped
+                    self._overrides[isin.upper()] = flag.strip()
         except FileNotFoundError:
             # It's okay if the file doesn't exist.
             pass

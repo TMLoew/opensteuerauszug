@@ -1,6 +1,7 @@
 from decimal import Decimal
 from typing import Optional, List, Set
 import logging
+import re
 
 from ..core.exchange_rate_provider import ExchangeRateProvider
 from ..core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Signs are defined in the ESTV Kursliste and have specific tax treatment meanings.
 # - KEP: Return of capital contributions (Rückzahlung Kapitaleinlagen) - non-taxable, skip payment
 # - (Q): With foreign withholding tax - requires special DA-1 treatment
-# - (V): Distribution in form of shares - not implemented
+# - (V): Distribution in form of shares (scrip dividend/stock dividend with cash equivalent)
 # - (KG): Capital gain - non-taxable for private investors, skip payment
 # - (KR): Return of Capital - non-taxable, skip payment
 # - Other signs are informational and don't affect tax calculation
@@ -43,7 +44,7 @@ KNOWN_SIGN_TYPES: Set[str] = {
     "(P)",   # Foreign earnings subject to withholding tax
     "PRO",   # Provisional
     "(Q)",   # With foreign withholding tax - SPECIAL HANDLING
-    "(V)",   # Distribution in form of shares - NOT IMPLEMENTED
+    "(V)",   # Distribution in form of shares (scrip dividend/stock dividend)
     "(Y)",   # Purchasing own shares
     "(Z)",   # Without withholding tax
 }
@@ -108,6 +109,41 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
             )
         return result
 
+    def _is_derivative_security(self, security: Security) -> bool:
+        """
+        Check if a security is a derivative (option, future, warrant).
+        These typically aren't in the Kursliste.
+
+        Args:
+            security: The security to check
+
+        Returns:
+            True if the security appears to be a derivative
+        """
+        # Check security category
+        if security.securityCategory in ['OPTION', 'FUTURE', 'WARRANT', 'FUT', 'OPT', 'WAR']:
+            return True
+
+        # Check security name patterns for options (e.g., "NVDA 21NOV25 197.5 C")
+        if security.securityName:
+            name = security.securityName.upper()
+            # Option patterns: contains dates and strike prices with C/P suffix
+            if ' C ' in name or ' P ' in name or name.endswith(' C') or name.endswith(' P'):
+                # Check for typical option naming patterns (date + strike)
+                # Matches patterns like "21NOV25", "250221", etc.
+                if re.search(r'\d{2}[A-Z]{3}\d{2}|\d{6}', name):
+                    return True
+
+            # Futures patterns (e.g., "SOFR3 DEC25", "SR3Z5")
+            if re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}', name):
+                return True
+
+        # Check symbol patterns (OCC option symbols often end with 8 zeros)
+        if security.symbol and re.search(r'[CP]\d{8}$', security.symbol):
+            return True
+
+        return False
+
     def _handle_Security(self, security: Security, path_prefix: str) -> None:
         self._current_kursliste_security = None
 
@@ -158,8 +194,13 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
             if security.taxValue:
                 closing_balance = security.taxValue.quantity
 
+            # Check if this is an option or futures contract (typically not in Kursliste)
+            is_derivative = self._is_derivative_security(security)
+
             if is_rights and closing_balance == 0:
                 logger.debug("Suppressing missing Kursliste warning for rights issue %s with zero balance.", ident)
+            elif is_derivative:
+                logger.debug("Suppressing missing Kursliste warning for derivative %s (options/futures typically not in Kursliste).", ident)
             else:
                 self._missing_kursliste_entries.append(ident)
 
@@ -237,7 +278,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                         f"mutations from the previous year are not "
                         f"processed. Please double-check the amount."
                     )
-                    logger.warning(warning_msg)
+                    logger.info(warning_msg)
                     self._previous_year_exdate_warnings.append({
                         "message": warning_msg,
                         "identifier": sec_ident,
@@ -427,10 +468,18 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                         sec_payment.additionalWithHoldingTaxUSA = Decimal("0")
                     sec_payment.lumpSumTaxCredit = True
 
+            # Handle (V) sign - Distribution in form of shares (scrip dividend/stock dividend)
+            # When Kursliste provides a cash value for (V) payments, treat as regular dividend
+            # for tax purposes since the taxable value is based on the cash equivalent provided
             if effective_sign == "(V)":
-                raise NotImplementedError(
-                    f"DA-1 for sign='(V)' not implemented for {security.isin or security.securityName} on {pay.paymentDate}"
+                logger.info(
+                    "Processing (V) sign payment for %s on %s with cash equivalent CHF %s",
+                    security.isin or security.securityName,
+                    pay.paymentDate,
+                    chf_amount
                 )
+                # The payment is already processed above with the correct cash values
+                # No special handling needed beyond standard dividend treatment
 
             result.append(sec_payment)
 

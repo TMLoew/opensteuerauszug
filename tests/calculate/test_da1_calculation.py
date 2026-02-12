@@ -205,9 +205,11 @@ def test_da1_calculation_for_share(kursliste_manager, monkeypatch):
     assert payment.nonRecoverableTaxPercent == Decimal("11.375")
     assert payment.nonRecoverableTaxAmount == Decimal("109.2")  # 960 * 0.11375
 
-def test_da1_calculation_v_sign_raises_error(kursliste_manager):
+def test_da1_calculation_v_sign_handled(kursliste_manager):
     """
-    Test that a (V) sign payment raises NotImplementedError.
+    Test that a (V) sign payment (stock dividend with cash equivalent) is handled correctly.
+    (V) sign indicates distribution in form of shares, but when Kursliste provides cash values,
+    it's treated as a regular dividend for tax purposes.
     """
     provider = KurslisteExchangeRateProvider(kursliste_manager)
     calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
@@ -228,6 +230,7 @@ def test_da1_calculation_v_sign_raises_error(kursliste_manager):
                 paymentValueCHF=Decimal("0.9"),
                 exchangeRate=Decimal("0.9"),
                 sign="(V)",
+                withHoldingTax=False,  # No withholding tax like Hong Kong dividends
             )
         ]
     )
@@ -258,5 +261,15 @@ def test_da1_calculation_v_sign_raises_error(kursliste_manager):
     )
 
     calc._current_kursliste_security = kl_sec
-    with pytest.raises(NotImplementedError):
-        calc.computePayments(sec, "sec")
+    # Should not raise an error - (V) sign is now handled
+    calc.computePayments(sec, "sec")
+
+    # Verify the payment was created
+    assert len(sec.payment) == 1
+    payment = sec.payment[0]
+    assert payment.sign == "(V)"
+    assert payment.amount == Decimal("50.0")  # 50 shares * 1.0 USD per share
+    assert payment.amountPerUnit == Decimal("1.0")
+    # For foreign security without withholding tax, grossRevenueB should be set
+    assert payment.grossRevenueB == Decimal("45.0")  # 50 shares * 0.9 CHF per share
+    assert payment.withHoldingTaxClaim == Decimal("0")

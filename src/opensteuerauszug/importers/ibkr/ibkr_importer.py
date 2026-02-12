@@ -689,15 +689,15 @@ class IbkrImporter:
                             continue
                         elif tx_type in [ibflex.CashAction.BROKERINTPAID]:
                             # TODO: Optionally create a liabilities section.
-                            logger.warning(f"Broker interest paid for {description} is not handled for liabilities.")
+                            logger.debug(f"Broker interest paid for {description} is not handled for liabilities.")
                             continue
                         elif tx_type in [ibflex.CashAction.FEES]:
                             # TODO: Optionally create a costs sections.
-                            logger.warning(f"Fees paid for {description} are ignored for statement.")
+                            logger.debug(f"Fees paid for {description} are ignored for statement.")
                             continue
                         elif tx_type in [ibflex.CashAction.ADVISORFEES]:
                             # TODO: Optionally create a costs sections.
-                            logger.warning(f"Fees paid for {description} are ignored for statement.")
+                            logger.debug(f"Fees paid for {description} are ignored for statement.")
                             continue
                         elif tx_type in [ibflex.CashAction.BROKERINTRCVD]:
                             # Tax relevant event. Fall through to create a bank payment.
