@@ -25,6 +25,7 @@ of this document.
 - **Positions**: Double-check that the end-of-year positions for all your holdings are accurate.
 - **Cash**: Verify that all cash balances are correct.
 - **Income**: Check that all interest and dividend income is correctly reported.
+- **Manual Prices**: Some securities may not be available in the official Kursliste and have been manually valued. These are marked with "Manual price (not from official Kursliste)" in the XML document. Please verify these valuations are accurate and properly documented.
 - **Recalculate in Tax Software**: After importing this document into your tax software, use its feature to **recalculate all tax values** based on the official Kursliste data.
 - **Verify the data landed in the Tax Software**: PrivateTax for example allows showing the imported structured information in the editor view.
 

@@ -9,6 +9,8 @@ Er dient der Vereinfachung vollständiger Dateneigenhabe und der Vermeidung von 
 
 Sämtliche Steuerberechnungen basieren auf der Kursliste und dienen nur Informationszwecken.
 
+**Wichtig**: Einige Wertpapiere sind in der offiziellen Kursliste nicht vorhanden und wurden vom Steuerpflichtigen manuell bewertet. Diese sind im Dokument mit dem Vermerk "Manual price (not from official Kursliste)" gekennzeichnet.
+
 Für mehr Information siehe die Seite "Hinweis für die Steuerbehörde"
 
 {: .long-version }
@@ -28,6 +30,8 @@ Die Verantwortung für die Richtigkeit und Vollständigkeit obliegt immer noch d
 - Die definitive auf der Kursliste basierende Steuerberechnung sollte von der Steuersoftware und/oder Veranlagungssoftware übernommen werden.
 
 Sämtliche Steuerberechnungen in dieser Datei basieren auf der Kursliste und dienen nur Informationszwecken.
+
+**Wichtig**: Einige Wertpapiere sind in der offiziellen Kursliste nicht vorhanden und wurden vom Steuerpflichtigen manuell bewertet. Diese sind im strukturierten XML-Dokument mit dem Vermerk "Manual price (not from official Kursliste)" gekennzeichnet und sollten von der Steuerbehörde besonders geprüft werden.
 
 ## Wieso ein Steuerauszug?
 

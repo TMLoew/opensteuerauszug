@@ -796,7 +796,12 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
         )
 
     # Wrap in a table to get the coloured background and border
-    table = Table([[inner]], colWidths=[None])
+    # Split warnings across multiple rows to allow page breaks
+    table_data = [[inner[0]]]  # Title in first row
+    for warning_para in inner[1:]:
+        table_data.append([warning_para])
+
+    table = Table(table_data, colWidths=[None])
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), _WARNING_BG),
         ('BOX', (0, 0), (-1, -1), 1, _WARNING_BORDER),
@@ -806,6 +811,9 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
         ('BOTTOMPADDING', (0, 0), (-1, -1), 3 * mm),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
     ]))
+    # Enable the table to split across pages
+    table.hAlign = 'LEFT'
+    table.repeatRows = 1  # Repeat the title row on each page
 
     return [Spacer(1, 4 * mm), table, Spacer(1, 4 * mm)]
 
@@ -1444,15 +1452,26 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
                 date_str = tax_value.referenceDate.strftime("%d.%m.%Y")
             else:
                 date_str = ""
+
+            # Add star marker for manual prices
+            unit_price_str = format_currency(tax_value.unitPrice) if tax_value and getattr(tax_value, 'unitPrice', None) else ''
+            tax_value_str = format_currency_2dp(tax_value.value) if tax_value and getattr(tax_value, 'value', None) else ''
+            if tax_value and hasattr(tax_value, 'kursliste') and tax_value.kursliste is False:
+                # Mark manual prices with a star
+                if unit_price_str:
+                    unit_price_str += ' *'
+                if tax_value_str:
+                    tax_value_str += ' *'
+
             table_data.append([
                 Paragraph(date_str, bold_left),
                 Paragraph('Bestand / Steuerwert / Ertrag', bold_left),
                 Paragraph(format_stock_quantity(tax_value.quantity, False, stock_quantity_template) if tax_value else '0', val_right),
                 Paragraph(tax_value.balanceCurrency or '' if tax_value else '', val_right),
-                Paragraph(format_currency(tax_value.unitPrice) if tax_value and getattr(tax_value, 'unitPrice', None) else '', val_right),
+                Paragraph(unit_price_str, val_right),
                 Paragraph('', val_left),
                 Paragraph('', val_right),
-                Paragraph(format_currency_2dp(tax_value.value) if tax_value and getattr(tax_value, 'value', None) else '', bold_right),
+                Paragraph(tax_value_str, bold_right),
                 '',
                 Paragraph(format_currency_2dp(security.totalGrossRevenueA), bold_right),
                 '',
@@ -1699,22 +1718,28 @@ def render_tax_statement(
         story.append(PageBreak())
         story.append(Paragraph("A-Werte mit Verrechnungssteuerabzug", title_style))
         story.append(securities_table_a)
+        story.append(Spacer(1, 0.2*cm))
+        story.append(Paragraph("* Manuell erfasster Preis (nicht aus der offiziellen Kursliste)", styles['Val_LEFT']))
         story.append(Spacer(1, 0.5*cm))
-    
+
     # --- Securities/Depots Section for Type B ---
     securities_table_b = create_securities_table(tax_statement, styles, usable_width, "B")
     if securities_table_b:
         story.append(PageBreak())
         story.append(Paragraph("B-Werte ohne Verrechnungssteuerabzug", title_style))
         story.append(securities_table_b)
+        story.append(Spacer(1, 0.2*cm))
+        story.append(Paragraph("* Manuell erfasster Preis (nicht aus der offiziellen Kursliste)", styles['Val_LEFT']))
         story.append(Spacer(1, 0.5*cm))
-    
+
     # --- Securities/Depots Section for Type DA1 ---
     securities_table_da1 = create_securities_table(tax_statement, styles, usable_width, "DA1")
     if securities_table_da1:
         story.append(PageBreak())
         story.append(Paragraph("Werte mit Anrechnung ausländischer Quellensteuer / zusätzlicher Steuerrückbehalt USA", title_style))
         story.append(securities_table_da1)
+        story.append(Spacer(1, 0.2*cm))
+        story.append(Paragraph("* Manuell erfasster Preis (nicht aus der offiziellen Kursliste)", styles['Val_LEFT']))
         story.append(Spacer(1, 0.5*cm))
 
     # Info pages before the barcode
