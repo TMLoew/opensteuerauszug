@@ -1,13 +1,35 @@
-# PDF files we often generate during testing
+# ============================================
+# SENSITIVE TAX DATA - DO NOT COMMIT
+# ============================================
+
+# PDF output files (contain personal tax data)
 /*.pdf
+/out/*.pdf
+
+# XML files (contain personal financial data)
+/out/*.xml
+/data/*.xml
+
+# Manual prices CSV (may contain portfolio information)
+/data/manual_prices.csv
+
+# Security identifiers (may contain personal portfolio info)
+/data/security_identifiers.csv
+
+# Configuration files (may contain personal information)
+/config.toml
+
+# Real tax data for integration testing
+/private
+
+# macOS metadata files
+.DS_Store
+**/.DS_Store
 
 # Emacs generated files (backups, auto-saves, lock files)
 *~
 #*#
 .#*
-
-# Real tax data for integration testing
-/private
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

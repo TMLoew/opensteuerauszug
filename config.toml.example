@@ -1,0 +1,47 @@
+# OpenSteuerAuszug Configuration Template
+# Copy this file to config.toml and fill in your personal information
+
+# 1. General Settings
+[general]
+canton = "ZH" # Required if importer doesn't provide canton. Comment out to use importer data (e.g., IBKR flex report).
+full_name = "Your Full Name Here"
+language = "de" # Default language (de, fr, it, en)
+
+[general.processing_flags]
+detect_foreign_income = true
+summarize_by_category = true
+
+# 2. Broker-level Settings / Overrides
+# Uncomment and configure the broker you use
+
+# Example: Schwab configuration
+# [brokers.schwab]
+# language = "en"
+
+# [brokers.schwab.processing_flags]
+# schwab_specific_flag = true
+
+# 3. Account-level Settings / Overrides
+# Configure your specific accounts here
+
+# Example: Schwab account
+# [brokers.schwab.accounts.my_account]
+# account_number = "YOUR_ACCOUNT_NUMBER"
+# full_name = "Your Name - Schwab Account"
+
+# Example: Interactive Brokers (IBKR)
+# [brokers.ibkr.accounts.my_ibkr_account]
+# account_number = "YOUR_IBKR_ACCOUNT"
+
+# 4. Kursliste Sign Overrides
+# Override Kursliste payment signs for specific securities (by ISIN)
+# This is useful when the Kursliste sign doesn't match the actual payment type
+[overrides]
+# Example override:
+# ISIN_CODE = "SIGN"
+#
+# Available signs:
+# - (Z) = Without withholding tax
+# - (V) = Distribution in form of shares (stock dividend)
+# - (Q) = With foreign withholding tax
+# See KNOWN_SIGN_TYPES in kursliste_tax_value_calculator.py for full list

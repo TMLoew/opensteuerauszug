@@ -1,7 +1,7 @@
 # 1. General Settings
 [general]
-canton = "ZG" # Required if importer doesn't provide canton. Comment out to use importer data (e.g., IBKR flex report).
-full_name = "Test User Name"
+canton = "SG" # Required if importer doesn't provide canton. Comment out to use importer data (e.g., IBKR flex report).
+full_name = "Tristan Maximilian Löw"
 language = "de" # Default language
 
 [general.processing_flags]
@@ -37,3 +37,12 @@ full_name = "Test User - Secondary Schwab" # Example of overriding a general set
 
 # [brokers.another_bank.accounts.main_chf]
 # account_number = "CH1234500000000000000"
+
+# 4. Kursliste Sign Overrides
+# Override Kursliste payment signs for specific securities (by ISIN)
+# This is useful when the Kursliste sign doesn't match the actual payment type
+[overrides]
+# HK0101000591 - HANG LUNG PROPERTIES LTD: Override (V) sign to (Z)
+# (V) = Distribution in form of shares (stock dividend) - not yet implemented
+# (Z) = Without withholding tax - appropriate for HK dividends
+# HK0101000591 = "Z"
