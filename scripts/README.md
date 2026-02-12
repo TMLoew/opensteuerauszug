@@ -1,94 +1,161 @@
-### Kursliste Filtering Script (`scripts/filter_kursliste.py`)
+# Scripts for OpenSteuerAuszug
 
-This script filters a large Kursliste XML file (as provided by the Swiss Federal Tax Administration, ESTV) to create a smaller, more manageable version. This is useful for testing, specific analysis, or when only a subset of securities is relevant. The filtering is based on specified valor numbers, and data can also be sourced from eCH-0196 tax statement XML files.
+This directory contains utility scripts for managing manual price data and other maintenance tasks.
 
-**Purpose:**
+## Manual Price Management
 
-To reduce the size of a Kursliste XML file by selecting specific securities (shares, funds, bonds) based on their valor numbers and including all necessary related data (currency definitions, country definitions, institutions, and relevant exchange rates).
+When securities are not available in the official Swiss Kursliste, you can manually specify their end-of-year prices using the `data/manual_prices.csv` file. These scripts help automate fetching prices from Yahoo Finance.
 
-**Command-Line Arguments:**
+### Prerequisites
 
-*   `--input-file <path>`: (Required) Path to the full Kursliste XML file.
-*   `--output-file <path>`: (Required) Path where the filtered Kursliste XML will be saved.
-*   `--valor-numbers <numbers>`: (Optional) A comma-separated string of valor numbers to include (e.g., "12345,67890").
-*   `--tax-statement-files <paths...>`: (Optional) One or more paths to eCH-0196 tax statement XML files (separated by spaces). Valor numbers and relevant currency codes will be automatically extracted from these files.
-*   `--include-bonds`: (Optional) If specified, bonds matching the valor numbers will also be included. By default, bonds are excluded unless this flag is present.
-*   `--target-currency <CUR>`: (Optional) The main target currency (e.g., "CHF", "USD"). Exchange rates relevant to this currency and currencies of selected securities will be prioritized. Defaults to "CHF".
-*   `--log-level <LEVEL>`: (Optional) Sets the logging level. Options are DEBUG, INFO, WARNING, ERROR. Defaults to "INFO".
-
-**Input Logic:**
-
-*   **Valor Numbers:** The script determines the final set of valor numbers to filter by taking the *union* of:
-    1.  Valor numbers explicitly provided via the `--valor-numbers` argument.
-    2.  Valor numbers found within all eCH-0196 tax statement files specified via the `--tax-statement-files` argument.
-    *At least one of these sources must provide some valor numbers for the script to select specific securities.*
-*   **Relevant Currencies:** The script identifies relevant currencies to ensure their definitions and exchange rates are included. This set is built from:
-    1.  The `--target-currency`.
-    2.  Currencies found in the provided eCH-0196 tax statement files (from bank accounts, securities, etc.).
-    3.  Currencies associated with the securities that are ultimately selected from the Kursliste based on the consolidated valor numbers.
-
-**Usage Example:**
+Install required dependencies:
 
 ```bash
-python scripts/filter_kursliste.py     --input-file data/kursliste/kursliste_2023.xml     --output-file data/kursliste/filtered_kursliste_test.xml     --valor-numbers "12345,67890"     --tax-statement-files "tests/samples/sample_ech0196_statement1.xml" "tests/samples/sample_ech0196_statement2.xml"     --include-bonds     --target-currency CHF     --log-level DEBUG
+pip install yfinance
 ```
 
-This example would:
-- Read `data/kursliste/kursliste_2023.xml`.
-- Extract valor numbers from the `--valor-numbers` argument and from both specified tax statement files.
-- Filter the Kursliste to include securities matching these combined valor numbers (including bonds if `--include-bonds` is present).
-- Ensure definitions and exchange rates for CHF, and any other currencies related to the selected securities or found in the tax statements, are included.
-- Save the smaller XML to `data/kursliste/filtered_kursliste_test.xml`.
-- Output detailed DEBUG logs.
-
-### Local Action Runner (`scripts/local_action_runner.py`)
-
-This script runs a command locally against a repository ref and publishes the results back to GitHub
-as a check run, with artifacts stored on a dedicated branch. This is useful for private data that
-cannot be uploaded to a GitHub Action runner.
-
-**Requirements:**
-
-* Python 3.10+
-* `git` available in PATH
-* A GitHub token with `repo` and `checks:write` scopes in `GITHUB_TOKEN`
-
-**Command-Line Arguments:**
-
-* `--repo <owner/repo>`: (Required unless `GITHUB_REPOSITORY` is set) Target repository.
-* `--ref <ref>`: (Optional) Branch, tag, or SHA to run. Defaults to repo default branch.
-* `--pr <number>`: (Optional) Pull request number to run (uses the PR head ref).
-* `--command <cmd>`: (Required) Command to run locally.
-* `--result-path <path>`: (Optional, repeatable) Relative paths to include in a zipped artifact.
-* `--show-diff`: (Optional) Show a diff before running the command.
-* `--artifact-branch <branch>`: (Optional) Branch used to store artifacts. Defaults to `local-action-artifacts`.
-* `--artifact-name <name>`: (Optional) Base name for the artifact zip file. Defaults to `local-run`.
-* `--check-name <name>`: (Optional) Name for the GitHub check run. Defaults to `local-action`.
-* `--upload-artifacts`: (Optional) Upload artifacts to the artifact branch (requires `--confirm-upload`).
-* `--confirm-upload`: (Optional) Confirm upload to GitHub (required to create a check run).
-* `--print-check-summary`: (Optional) Print the text uploaded to GitHub (default).
-* `--no-print-check-summary`: (Optional) Disable printing the check summary.
-
-**Usage Example:**
+Or install in the virtual environment:
 
 ```bash
-export GITHUB_TOKEN="..."
-python scripts/local_action_runner.py \
-  --repo my-org/my-repo \
-  --ref feature/my-branch \
-  --command "python scripts/my_private_job.py --input /secure/data" \
-  --result-path results/output.json \
-  --result-path results/logs \
-  --artifact-name private-run
+.venv/bin/pip install yfinance
 ```
 
-This will:
-- Clone the target ref to a temporary folder.
-- Run the command locally.
-- Store logs and optional result paths under `local-action-results/<run-id>/`.
-- Only upload artifacts and create a check run when `--upload-artifacts` and `--confirm-upload` are set.
+### Automated Workflow (Recommended)
 
-**Safety note:** this repository is public. By default the script does not upload artifacts or
-create a check run. When you opt in to `--confirm-upload` without `--upload-artifacts`, only the
-stderr text is sent to the check run summary. Only opt in after reviewing outputs and confirming
-they are safe to publish.
+The easiest way to update all manual prices is to use the extraction script with the update script:
+
+```bash
+# Step 1: Run opensteuerauszug and extract missing securities
+python -m opensteuerauszug.steuerauszug --importer ibkr --tax-calculation-level fillin \
+  --output out/output.pdf --xml-output out/output.xml \
+  --period-from 2025-01-01 --period-to 2025-12-31 \
+  data/your_file.xml 2>&1 | python scripts/extract_missing_securities.py --update-mapping
+
+# Step 2: Fetch all prices
+python scripts/update_all_manual_prices.py --year 2025
+
+# Step 3: Regenerate with updated prices
+python -m opensteuerauszug.steuerauszug --importer ibkr --tax-calculation-level fillin \
+  --output out/output.pdf --xml-output out/output.xml \
+  --period-from 2025-01-01 --period-to 2025-12-31 \
+  data/your_file.xml
+```
+
+### extract_missing_securities.py
+
+**New!** Automatically extracts securities missing from the Kursliste and finds their ISINs and ticker symbols.
+
+#### Usage
+
+```bash
+# Extract and display missing securities (reads from stdin)
+python -m opensteuerauszug.steuerauszug ... 2>&1 | python scripts/extract_missing_securities.py
+
+# Or save output first, then extract
+python -m opensteuerauszug.steuerauszug ... > output.log 2>&1
+python scripts/extract_missing_securities.py --input output.log
+
+# Automatically update the ISIN_TO_SYMBOL mapping
+python scripts/extract_missing_securities.py --input output.log --update-mapping
+
+# Verify symbols with Yahoo Finance
+python scripts/extract_missing_securities.py --input output.log --verify-symbols
+```
+
+The script:
+1. Parses warning messages about missing Kursliste entries
+2. Extracts ISINs from the XML output
+3. Matches them with ticker symbols from the warnings
+4. Optionally updates `update_all_manual_prices.py` automatically
+
+### update_all_manual_prices.py
+
+**Recommended approach** - Updates all securities with a predefined ISIN-to-symbol mapping.
+
+#### Usage
+
+```bash
+# Dry run to preview changes
+python scripts/update_all_manual_prices.py --year 2025 --dry-run
+
+# Actually update the CSV
+python scripts/update_all_manual_prices.py --year 2025
+```
+
+#### Adding New Securities
+
+You can either:
+1. Use `extract_missing_securities.py --update-mapping` (recommended)
+2. Manually edit the `ISIN_TO_SYMBOL` dictionary in `update_all_manual_prices.py`:
+
+```python
+ISIN_TO_SYMBOL = {
+    'CA65118M1032': 'NCAUF',      # NEWCORE GOLD LTD
+    'US45783Q1004': 'NOTV',       # INOTIV INC
+    'US64131A1051': 'STIM',       # NEURONETICS INC
+    'US02080L1026': 'TKNO',       # ALPHA TEKNOVA INC
+    'US30068X1037': 'XGN',        # EXAGEN INC
+    # Add your securities here
+    'US88160R1014': 'TSLA',       # TESLA INC
+}
+```
+
+### fetch_prices_yfinance.py
+
+Lower-level script for updating individual securities or exploring prices.
+
+#### Usage
+
+```bash
+# Show current manual prices
+python scripts/fetch_prices_yfinance.py --year 2025
+
+# Update a specific security
+python scripts/fetch_prices_yfinance.py --year 2025 --isin US88160R1014 --symbol TSLA
+
+# Use custom CSV path
+python scripts/fetch_prices_yfinance.py --year 2025 --isin US88160R1014 --symbol TSLA --csv my_prices.csv
+```
+
+## Finding Ticker Symbols
+
+To find the Yahoo Finance ticker symbol for a security:
+
+1. Go to https://finance.yahoo.com
+2. Search for the security by name or ISIN
+3. The symbol appears in the URL: `https://finance.yahoo.com/quote/TSLA`
+
+For OTC/Pink Sheet securities (common for small-cap stocks):
+- US securities often have a 5-letter symbol ending in 'F' (e.g., NCAUF, NOTV)
+- Check the company's investor relations page
+- Search on Yahoo Finance by company name
+
+## How Manual Prices Work
+
+1. The `ManualPriceProvider` reads prices from `data/manual_prices.csv`
+2. During tax calculation, if a security is not in the Kursliste, the manual price is used
+3. Manual prices are marked in the XML with `name="Manual price (not from official Kursliste)"`
+4. The PDF includes notices in German and English about manually-set prices
+
+## CSV Format
+
+The `manual_prices.csv` file has the following format:
+
+```csv
+isin,date,price,currency
+CA65118M1032,2025-12-31,0.45,USD
+US45783Q1004,2025-12-31,0.56,USD
+```
+
+- **isin**: The ISIN code of the security
+- **date**: The valuation date (typically December 31st of the tax year)
+- **price**: The closing price on that date
+- **currency**: The currency of the price (will be converted to CHF automatically)
+
+## Notes
+
+- Prices are fetched for the closest available trading date to December 31st
+- Yahoo Finance may not have data for weekends/holidays - the script uses the last available trading day
+- The currency is automatically detected from Yahoo Finance (usually USD for US securities)
+- Prices are rounded to 2 decimal places
+- If fetching fails, existing entries are preserved
