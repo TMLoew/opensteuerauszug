@@ -753,11 +753,9 @@ class OpenSteuerAuszugWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:
         """Handle application state changes including theme changes."""
         super().changeEvent(event)
-        if event.type() == QEvent.Type.PaletteChange:
-            # System theme changed - reapply styling
-            # Use QTimer to defer styling update to avoid potential recursion
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._apply_native_styling)
+        # Note: Dynamic theme switching via changeEvent can cause crashes in PySide6
+        # The stylesheet already uses palette() references which automatically adapt
+        # to system theme changes, so explicit reapplication is not needed
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Handle drag enter event for file drops."""
