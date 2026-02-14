@@ -5,8 +5,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QProcess, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QDate, QProcess, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -40,12 +41,13 @@ from .gui_command_builder import (
 class OpenSteuerAuszugWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("OpenSteuerAuszug")
+        self.setWindowTitle("OpenSteuerAuszug - Swiss Tax Statement Generator")
         self.resize(1080, 760)
         self._process: Optional[QProcess] = None
         self._manual_pdf_output = False
         self._manual_xml_output = False
         self._build_ui()
+        self._setup_shortcuts()
         self._wire_events()
         self._apply_defaults()
         self._update_command_preview()
@@ -152,6 +154,37 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 font-family: "Menlo", "Consolas", monospace;
                 font-size: 12px;
             }
+            #statusLabel {
+                font-weight: 600;
+                color: #465569;
+                padding: 4px 0;
+            }
+            #statusLabel[status="ready"] {
+                color: #465569;
+            }
+            #statusLabel[status="running"] {
+                color: #1e7d4f;
+            }
+            #statusLabel[status="success"] {
+                color: #1e7d4f;
+            }
+            #statusLabel[status="error"] {
+                color: #a9412b;
+            }
+            #progressBar {
+                border: none;
+                background: #e8ecf1;
+                border-radius: 2px;
+            }
+            #progressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1e7d4f, stop:1 #2a9d64);
+                border-radius: 2px;
+            }
+            QPushButton#generateButton {
+                min-height: 32px;
+                font-size: 14px;
+            }
             """
         )
 
@@ -161,20 +194,37 @@ class OpenSteuerAuszugWindow(QMainWindow):
         grid.setColumnStretch(1, 1)
 
         self.input_path_edit = QLineEdit()
+        self.input_path_edit.setToolTip("Select your broker statement file (XML for IBKR, directory for Schwab)")
         self.input_browse_btn = QPushButton("Browse...")
+        self.input_browse_btn.setToolTip("Browse for input file or directory")
+
         self.importer_combo = QComboBox()
         self.importer_combo.addItem("Interactive Brokers (IBKR)", "ibkr")
         self.importer_combo.addItem("Charles Schwab", "schwab")
         self.importer_combo.addItem("None (raw/advanced workflows)", "none")
+        self.importer_combo.setToolTip("Select your broker type - prices are automatically extracted from IBKR statements")
+
         self.tax_year_spin = QSpinBox()
         self.tax_year_spin.setRange(1900, 2200)
+        self.tax_year_spin.setToolTip("The tax year for which to generate the statement (usually last year)")
+
         self.tax_calc_combo = QComboBox()
         self.tax_calc_combo.addItem("Full (fill missing via manual prices)", "fillin")
         self.tax_calc_combo.addItem("Kursliste only", "kursliste")
         self.tax_calc_combo.addItem("Minimal", "minimal")
         self.tax_calc_combo.addItem("None", "none")
+        self.tax_calc_combo.setToolTip(
+            "Full: Use Kursliste + automatic price extraction from broker data (recommended)\n"
+            "Kursliste only: Only use official Swiss Kursliste\n"
+            "Minimal/None: Basic calculations without exchange rates"
+        )
+
         self.institution_name_edit = QLineEdit()
         self.institution_name_edit.setPlaceholderText("Optional, e.g. LYNX B.V.")
+        self.institution_name_edit.setToolTip(
+            "Override the institution name in the PDF output.\n"
+            "Useful for correcting broker names (e.g., 'LYNX B.V.' instead of 'Interactive Brokers')"
+        )
 
         grid.addWidget(QLabel("Input file/directory"), 0, 0)
         grid.addWidget(self.input_path_edit, 0, 1)
@@ -259,20 +309,42 @@ class OpenSteuerAuszugWindow(QMainWindow):
 
     def _build_execution_group(self) -> QGroupBox:
         group = QGroupBox("Execution")
-        row = QHBoxLayout(group)
-        row.setContentsMargins(8, 8, 8, 8)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
 
-        self.generate_btn = QPushButton("Generate")
+        # Status and progress
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("statusLabel")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("progressBar")
+        self.progress_bar.setMaximum(0)  # Indeterminate
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(4)
+
+        status_row.addWidget(self.status_label)
+        status_row.addStretch(1)
+        layout.addLayout(status_row)
+        layout.addWidget(self.progress_bar)
+
+        # Buttons
+        button_row = QHBoxLayout()
+        self.generate_btn = QPushButton("Generate Tax Statement")
         self.generate_btn.setObjectName("generateButton")
+        self.generate_btn.setToolTip("Generate tax statement from broker data (Ctrl+Return)")
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setObjectName("cancelButton")
         self.cancel_btn.setEnabled(False)
-        self.clear_log_btn = QPushButton("Clear log")
+        self.cancel_btn.setToolTip("Cancel running generation (Esc)")
+        self.clear_log_btn = QPushButton("Clear Log")
+        self.clear_log_btn.setToolTip("Clear the output log (Ctrl+L)")
 
-        row.addWidget(self.generate_btn)
-        row.addWidget(self.cancel_btn)
-        row.addWidget(self.clear_log_btn)
-        row.addStretch(1)
+        button_row.addWidget(self.generate_btn)
+        button_row.addWidget(self.cancel_btn)
+        button_row.addWidget(self.clear_log_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
         return group
 
     def _build_expert_group(self) -> QGroupBox:
@@ -340,6 +412,34 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self.log_output.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(self.log_output)
         return group
+
+    def _setup_shortcuts(self) -> None:
+        """Set up keyboard shortcuts."""
+        # Generate: Ctrl+Return
+        generate_action = QAction(self)
+        generate_action.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return))
+        generate_action.triggered.connect(self._run_generation)
+        self.addAction(generate_action)
+
+        # Cancel: Escape (when running)
+        cancel_action = QAction(self)
+        cancel_action.setShortcut(QKeySequence(Qt.Key_Escape))
+        cancel_action.triggered.connect(self._cancel_generation)
+        self.addAction(cancel_action)
+
+        # Clear log: Ctrl+L
+        clear_log_action = QAction(self)
+        clear_log_action.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_L))
+        clear_log_action.triggered.connect(self.log_output.clear)
+        self.addAction(clear_log_action)
+
+        # Expert mode toggle: Ctrl+E
+        expert_action = QAction(self)
+        expert_action.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_E))
+        expert_action.triggered.connect(lambda: self.expert_mode_checkbox.setChecked(
+            not self.expert_mode_checkbox.isChecked()
+        ))
+        self.addAction(expert_action)
 
     def _wire_events(self) -> None:
         self.input_browse_btn.clicked.connect(self._browse_input)
@@ -633,6 +733,8 @@ class OpenSteuerAuszugWindow(QMainWindow):
 
         self._process = process
         self._set_running(True)
+        self._update_status("Running generation...", "running")
+        self.progress_bar.setVisible(True)
 
     def _drain_process_output(self) -> None:
         if not self._process:
@@ -648,15 +750,18 @@ class OpenSteuerAuszugWindow(QMainWindow):
     def _on_process_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         self._drain_process_output()
         self._set_running(False)
+        self.progress_bar.setVisible(False)
 
         success = exit_status == QProcess.NormalExit and exit_code == 0
         if success:
+            self._update_status("✓ Generation completed successfully", "success")
             self.log_output.appendPlainText("\n[GUI] Generation finished successfully.\n")
             output_pdf = self.output_pdf_edit.text().strip()
             if self.open_pdf_checkbox.isChecked() and output_pdf and Path(output_pdf).exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(output_pdf).resolve())))
-            QMessageBox.information(self, "Success", "Tax statement generated successfully.")
+            QMessageBox.information(self, "Success", "Tax statement generated successfully!")
         else:
+            self._update_status("✗ Generation failed", "error")
             self.log_output.appendPlainText(
                 f"\n[GUI] Generation failed (exit code {exit_code}, status {int(exit_status)}).\n"
             )
@@ -670,11 +775,26 @@ class OpenSteuerAuszugWindow(QMainWindow):
         if not self._process or self._process.state() == QProcess.NotRunning:
             return
 
+        self._update_status("Cancelling...", "error")
         self.log_output.appendPlainText("\n[GUI] Cancelling run...\n")
         self._process.terminate()
         if not self._process.waitForFinished(2000):
             self._process.kill()
             self._process.waitForFinished(1000)
+        self.progress_bar.setVisible(False)
+        self._update_status("Cancelled", "ready")
+
+    def _update_status(self, message: str, status: str = "ready") -> None:
+        """Update the status label with message and status color.
+
+        Args:
+            message: Status message to display
+            status: Status type - "ready", "running", "success", "error"
+        """
+        self.status_label.setText(message)
+        self.status_label.setProperty("status", status)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
 
     def _set_running(self, running: bool) -> None:
         self.expert_mode_checkbox.setEnabled(not running)
