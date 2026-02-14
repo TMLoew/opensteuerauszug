@@ -753,9 +753,9 @@ class OpenSteuerAuszugWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:
         """Handle application state changes including theme changes."""
         super().changeEvent(event)
-        # Note: Dynamic theme switching via changeEvent can cause crashes in PySide6
-        # The stylesheet already uses palette() references which automatically adapt
-        # to system theme changes, so explicit reapplication is not needed
+        # Note: Qt/PySide6 doesn't reliably support dynamic theme switching without crashes
+        # The app will respect the system theme when launched, but requires restart to update
+        # This is common behavior for many Qt applications on macOS
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Handle drag enter event for file drops."""
