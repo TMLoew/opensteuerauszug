@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QProcess, QSettings, Qt, QUrl
+from PySide6.QtCore import QDate, QEvent, QProcess, QSettings, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -77,9 +78,12 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 background-color: palette(window);
             }
             QWidget {
-                font-family: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+                font-family: ".AppleSystemUIFont", "Helvetica Neue", sans-serif;
                 font-size: 13px;
                 color: palette(text);
+            }
+            QLabel {
+                padding-right: 8px;
             }
             #heroTitle {
                 font-size: 28px;
@@ -97,17 +101,18 @@ class OpenSteuerAuszugWindow(QMainWindow):
             QGroupBox {
                 border: 1px solid palette(mid);
                 border-radius: 10px;
-                margin-top: 12px;
-                padding-top: 16px;
+                margin-top: 16px;
+                padding-top: 20px;
                 font-weight: 600;
                 background: palette(base);
                 font-size: 13px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
+                subcontrol-position: top left;
                 left: 12px;
-                top: -8px;
-                padding: 0 6px;
+                top: 0px;
+                padding: 2px 8px;
                 background: palette(window);
                 color: palette(text);
             }
@@ -169,7 +174,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 padding: 5px 9px;
             }
             QPlainTextEdit {
-                font-family: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
+                font-family: "Monaco", "Menlo", "Consolas", monospace;
                 font-size: 11px;
                 border: 1px solid palette(mid);
                 border-radius: 6px;
@@ -177,6 +182,13 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 padding: 8px;
                 selection-background-color: #007aff;
                 selection-color: white;
+            }
+            QPlainTextEdit#commandPreview {
+                font-size: 10px;
+                min-height: 60px;
+            }
+            QPlainTextEdit#logOutput {
+                min-height: 200px;
             }
             QCheckBox {
                 spacing: 6px;
@@ -260,12 +272,61 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 background: palette(mid);
                 margin: 4px 8px;
             }
+            QScrollBar:vertical {
+                border: none;
+                background: palette(base);
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: palette(mid);
+                min-height: 30px;
+                border-radius: 6px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: palette(dark);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: palette(base);
+                height: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: palette(mid);
+                min-width: 30px;
+                border-radius: 6px;
+                margin: 2px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: palette(dark);
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
         """
         self.setStyleSheet(stylesheet)
 
     def _build_ui(self) -> None:
-        root = QWidget(self)
-        self.setCentralWidget(root)
+        # Create scroll area as central widget
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        self.setCentralWidget(scroll)
+
+        # Create content widget
+        root = QWidget()
+        scroll.setWidget(root)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
@@ -301,13 +362,15 @@ class OpenSteuerAuszugWindow(QMainWindow):
         layout.addWidget(self.advanced_group)
         layout.addWidget(self.expert_group)
         layout.addWidget(self._build_execution_group())
-        layout.addWidget(self._build_log_group(), stretch=1)
+        layout.addWidget(self._build_log_group())
+        layout.addStretch()  # Add stretch at bottom to push content up
 
         self._apply_native_styling()
 
     def _build_input_group(self) -> QGroupBox:
         group = QGroupBox("Input")
         grid = QGridLayout(group)
+        grid.setColumnMinimumWidth(0, 200)  # Ensure labels have enough space
         grid.setColumnStretch(1, 1)
 
         self.input_path_edit = QLineEdit()
@@ -359,6 +422,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
     def _build_output_group(self) -> QGroupBox:
         group = QGroupBox("Output")
         grid = QGridLayout(group)
+        grid.setColumnMinimumWidth(0, 200)  # Ensure labels have enough space
         grid.setColumnStretch(1, 1)
 
         self.output_pdf_edit = QLineEdit()
@@ -411,9 +475,14 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self.filter_to_period_checkbox.setChecked(True)
 
         self.command_preview = QPlainTextEdit()
+        self.command_preview.setObjectName("commandPreview")
         self.command_preview.setReadOnly(True)
         self.command_preview.setMaximumBlockCount(200)
-        self.command_preview.setFixedHeight(80)
+        self.command_preview.setMinimumHeight(60)
+        self.command_preview.setMaximumHeight(120)
+        self.command_preview.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.command_preview.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.command_preview.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         form.addRow("Config file", config_layout)
         form.addRow("Kursliste directory", kursliste_layout)
@@ -525,8 +594,11 @@ class OpenSteuerAuszugWindow(QMainWindow):
         group = QGroupBox("Run Log")
         layout = QVBoxLayout(group)
         self.log_output = QPlainTextEdit()
+        self.log_output.setObjectName("logOutput")
         self.log_output.setReadOnly(True)
-        self.log_output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log_output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.log_output.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.log_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         layout.addWidget(self.log_output)
         return group
 
@@ -666,6 +738,9 @@ class OpenSteuerAuszugWindow(QMainWindow):
         else:
             self.resize(1100, 800)
 
+        # Set minimum window size to prevent text cutoff
+        self.setMinimumWidth(900)
+
     def _save_window_state(self) -> None:
         """Save window size and position to settings."""
         self._settings.setValue("window_geometry", self.saveGeometry())
@@ -674,6 +749,15 @@ class OpenSteuerAuszugWindow(QMainWindow):
         """Handle window close event."""
         self._save_window_state()
         super().closeEvent(event)
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Handle application state changes including theme changes."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            # System theme changed - reapply styling
+            # Use QTimer to defer styling update to avoid potential recursion
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self._apply_native_styling)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Handle drag enter event for file drops."""

@@ -1,41 +1,52 @@
 # OpenSteuerAuszug
 
 A Python package for generating Swiss tax statements (Steuerauszüge) from the statements of brokers that don't support it, e.g. mostly foreign ones.
-This goal is to eliminate tedious and error prone manual typing into the tax software.
+The goal is to eliminate tedious and error-prone manual typing into the tax software.
 
 ## Disclaimer
 
 - The package is not formally audited
-- the main focus is on getting core transaction and interest data.
+- The main focus is on getting core transaction and interest data
 - These need to be verified by the user before submitting with the tax return
-- Tax values are computed best effort for informational purpose (the main Tax software should be able to compute it from the core transaction data.
+- Tax values are computed best effort for informational purposes (the main Tax software should be able to compute it from the core transaction data)
 
-For more information on required due diligence see the the user guide.
+For more information on required due diligence see the [User Guide](docs/user_guide.md).
 
-## Usage
+## Quick Start
 
-### Main usage case: Generating Steuerauszug from Broker Data
+### Desktop GUI (Recommended)
 
-After installing, see the [User Guide](docs/user_guide.md) for preparation steps, how to get broker data and run the command.
-
-### Desktop GUI
-
-The project includes a desktop GUI (PySide6, no Tkinter).
+The easiest way to use OpenSteuerAuszug is through the native macOS desktop GUI:
 
 ```bash
+# Install with GUI dependencies
 pip install -e ".[gui]"
+
+# Launch the GUI
 opensteuerauszug-gui
 ```
 
-GUI behavior:
-- **Simple mode (default)**: only required fields (input, broker, year, outputs).
-- **Expert mode**: exposes full CLI parity (`--phases`, `--raw-import`, `--debug-dump`, `--set`, `--org-nr`, etc.).
-- Real-time run logs are streamed in-app.
+**Features:**
+- **Native macOS integration** - Automatic dark mode, native fonts, and macOS shortcuts
+- **Automatic price extraction** - Prices are automatically extracted from IBKR OpenPosition data
+- **Drag & drop** - Simply drop your broker XML file onto the window
+- **Simple mode (default)** - Just select your file, broker, and year - done!
+- **Expert mode (⌘E)** - Full CLI parity with all advanced options
+- **Real-time logs** - Watch the generation process with live output
+- **Year-specific manual prices** - Automatically saves and applies manual prices per tax year
+- **Visual indicators** - Securities using manual prices are marked with asterisks (*) in the PDF
+- **Bilingual warnings** - Important notices appear in both English and German
 
-Security note:
-- Keep personal settings in a local file such as `config.local.toml` and select it in GUI Expert mode (or CLI `--config config.local.toml`).
-- Local sensitive artifacts are ignored via `.gitignore` (`data/*.xml`, `out/*`, manual price files, `.envrc`, etc.).
-- If your local `config.toml` or `data/security_identifiers.csv` contains personal data, do not include those edits in commits (they are tracked files).
+See [GUI_GUIDE.md](GUI_GUIDE.md) for detailed GUI documentation.
+
+### Command Line Interface
+
+After installing, see the [User Guide](docs/user_guide.md) for preparation steps, how to get broker data and run the command.
+
+**Security note:**
+- Keep personal settings in a local file such as `config.local.toml` and select it in GUI Expert mode (or CLI `--config config.local.toml`)
+- Local sensitive artifacts are ignored via `.gitignore` (`data/*.xml`, `out/*`, manual price files, `.envrc`, etc.)
+- If your local `config.toml` or `data/security_identifiers.csv` contains personal data, do not include those edits in commits (they are tracked files)
 
 ### Verifying an Existing Steuerauszug
 
@@ -45,10 +56,21 @@ The tool can also be used to cross check and existing existing Steuerauszug (eCH
 
 ## Features
 
-- Import broker data provide transaction and position data in [ECH-0196](https://www.ech.ch/de/ech/ech-0196/2.2.0) compliant format.
-- Perform simple tax approximations for informational purposes.
-- Cross verify calculations against existing E-Steuerauszug data
-- Create standardized formatted PDF that can be imported into Tax Software. 
+### Core Functionality
+- **Import broker data** - Provide transaction and position data in [ECH-0196](https://www.ech.ch/de/ech/ech-0196/2.2.0) compliant format
+- **Automatic price extraction** - Extract year-end security prices from IBKR OpenPosition data
+- **Manual price management** - Year-specific CSV files for securities not in official Kursliste
+- **Tax calculations** - Simple tax approximations for informational purposes
+- **Cross verification** - Verify calculations against existing E-Steuerauszug data
+- **PDF generation** - Create standardized formatted PDFs that can be imported into Tax Software
+- **Visual indicators** - Securities using manual prices are clearly marked in the output
+
+### Automation Scripts
+- **Automatic price updates** - Scripts to extract and update manual prices from broker data
+- **Yahoo Finance integration** - Fetch current prices for securities with tickers
+- **Workflow automation** - Combined scripts for end-to-end price management
+
+See [USAGE.md](USAGE.md) and [scripts/README.md](scripts/README.md) for details. 
 
 ## Supported Brokers
 
