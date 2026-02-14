@@ -10,11 +10,22 @@ pip install -e ".[gui]"
 python -m opensteuerauszug.util.gui_launcher
 ```
 
+## Native macOS Experience
+
+The GUI is designed to feel like a native macOS application:
+- **🌓 Automatic dark mode** - Adapts to your system theme
+- **🎨 Native styling** - Uses SF Pro font and macOS design patterns
+- **📂 Drag & drop** - Drop XML files directly onto the window
+- **📝 Recent files** - Quick access to recently opened files
+- **💾 State persistence** - Remembers window size and position
+- **⌨️ Native shortcuts** - Standard macOS keyboard shortcuts
+
 ## Features
 
 ### Simple Mode (Default)
 Perfect for most users - just fill in:
 1. **Input file**: Your broker XML file (IBKR) or directory (Schwab)
+   - Or simply **drag & drop** a file onto the window!
 2. **Broker**: Select IBKR or Schwab
 3. **Tax year**: Usually the previous year (auto-filled)
 4. **Institution name** (optional): Override broker name (e.g., "LYNX B.V.")
@@ -30,14 +41,29 @@ Toggle with **Ctrl+E** or the checkbox to access:
 - Advanced logging levels
 - Configuration overrides
 
+## Menu Bar
+
+### File Menu
+- **Open... (⌘O)** - Browse for input file
+- **Open Recent** - Quick access to recently opened files
+- **Close Window (⌘W)** - Close the GUI window
+
+### View Menu
+- **Expert Mode (⌘E)** - Toggle expert mode settings
+
+### Help Menu
+- **Documentation** - Open GitHub documentation
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
+| **⌘O** | Open file dialog |
+| **⌘W** | Close window |
+| **⌘E** | Toggle expert mode |
 | **Ctrl+Return** | Generate tax statement |
 | **Escape** | Cancel running generation |
 | **Ctrl+L** | Clear output log |
-| **Ctrl+E** | Toggle expert mode |
 
 ## Visual Indicators
 

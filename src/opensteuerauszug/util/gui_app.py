@@ -5,8 +5,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QProcess, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtCore import QDate, QProcess, QSettings, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -14,12 +14,15 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -41,34 +44,248 @@ from .gui_command_builder import (
 class OpenSteuerAuszugWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("OpenSteuerAuszug - Swiss Tax Statement Generator")
-        self.resize(1080, 760)
+        self.setWindowTitle("OpenSteuerAuszug")
         self._process: Optional[QProcess] = None
         self._manual_pdf_output = False
         self._manual_xml_output = False
+        self._settings = QSettings("OpenSteuerAuszug", "OpenSteuerAuszug")
+        self._recent_files: list[str] = []
+        self._load_recent_files()
+        self._restore_window_state()
         self._build_ui()
+        self._setup_menu_bar()
         self._setup_shortcuts()
         self._wire_events()
         self._apply_defaults()
         self._update_command_preview()
+        self.setAcceptDrops(True)
+
+    def _apply_native_styling(self) -> None:
+        """Apply native macOS styling with dark mode support."""
+        # Use system palette for automatic dark mode support
+        app = QApplication.instance()
+        if app:
+            app.setStyle("Fusion")  # Fusion style works better with custom palettes
+
+        # Detect if dark mode is active
+        palette = self.palette()
+        is_dark = palette.color(QPalette.Window).lightness() < 128
+
+        # Native macOS-style stylesheet that adapts to system theme
+        stylesheet = """
+            QMainWindow {
+                background-color: palette(window);
+            }
+            QWidget {
+                font-family: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+                font-size: 13px;
+                color: palette(text);
+            }
+            #heroTitle {
+                font-size: 28px;
+                font-weight: 600;
+                color: palette(text);
+                padding: 8px 0 4px 0;
+                letter-spacing: -0.5px;
+            }
+            #heroSubtitle {
+                font-size: 13px;
+                color: palette(mid);
+                padding: 0 0 16px 0;
+                line-height: 1.5;
+            }
+            QGroupBox {
+                border: 1px solid palette(mid);
+                border-radius: 10px;
+                margin-top: 12px;
+                padding-top: 16px;
+                font-weight: 600;
+                background: palette(base);
+                font-size: 13px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                top: -8px;
+                padding: 0 6px;
+                background: palette(window);
+                color: palette(text);
+            }
+            QPushButton {
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                background: palette(button);
+                padding: 7px 16px;
+                min-width: 100px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: palette(light);
+                border-color: palette(dark);
+            }
+            QPushButton:pressed {
+                background: palette(mid);
+            }
+            QPushButton:disabled {
+                color: palette(mid);
+                border-color: palette(midlight);
+            }
+            QPushButton#generateButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #34c759, stop:1 #30b350);
+                color: white;
+                border: 1px solid #2ea043;
+                font-weight: 600;
+                min-height: 36px;
+                font-size: 14px;
+            }
+            QPushButton#generateButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #30b350, stop:1 #2ea043);
+            }
+            QPushButton#generateButton:pressed {
+                background: #2ea043;
+            }
+            QPushButton#cancelButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #ff3b30, stop:1 #e6352b);
+                color: white;
+                border: 1px solid #d92b21;
+            }
+            QPushButton#cancelButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #e6352b, stop:1 #d92b21);
+            }
+            QLineEdit, QComboBox, QSpinBox, QDateEdit {
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                background: palette(base);
+                padding: 6px 10px;
+                selection-background-color: #007aff;
+                selection-color: white;
+            }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus {
+                border: 2px solid #007aff;
+                padding: 5px 9px;
+            }
+            QPlainTextEdit {
+                font-family: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
+                font-size: 11px;
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                background: palette(base);
+                padding: 8px;
+                selection-background-color: #007aff;
+                selection-color: white;
+            }
+            QCheckBox {
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 1px solid palette(mid);
+                background: palette(base);
+            }
+            QCheckBox::indicator:checked {
+                background: #007aff;
+                border-color: #007aff;
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDQuNUw0LjUgOEwxMSAxIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L3N2Zz4K);
+            }
+            #statusLabel {
+                font-weight: 600;
+                font-size: 13px;
+                padding: 6px 0;
+            }
+            #statusLabel[status="ready"] {
+                color: palette(mid);
+            }
+            #statusLabel[status="running"] {
+                color: #34c759;
+            }
+            #statusLabel[status="success"] {
+                color: #34c759;
+            }
+            #statusLabel[status="error"] {
+                color: #ff3b30;
+            }
+            #progressBar {
+                border: none;
+                background: palette(midlight);
+                border-radius: 2px;
+                min-height: 4px;
+                max-height: 4px;
+            }
+            #progressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #34c759, stop:1 #30b350);
+                border-radius: 2px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDFMNSA1TDkgMSIgc3Ryb2tlPSIjODg4ODg4IiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L3N2Zz4K);
+            }
+            QMenuBar {
+                background: transparent;
+                border: none;
+            }
+            QMenuBar::item {
+                padding: 4px 10px;
+                background: transparent;
+            }
+            QMenuBar::item:selected {
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
+            QMenu {
+                background: palette(base);
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #007aff;
+                color: white;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: palette(mid);
+                margin: 4px 8px;
+            }
+        """
+        self.setStyleSheet(stylesheet)
 
     def _build_ui(self) -> None:
         root = QWidget(self)
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        # Header with icon and title
+        header = QWidget()
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(4)
 
         title = QLabel("Swiss Tax Statement Generator")
         title.setObjectName("heroTitle")
         subtitle = QLabel(
-            "One-click generation from broker exports. Automatic price extraction and year-specific "
-            "manual prices are applied in the backend."
+            "One-click generation from broker exports. Prices are automatically extracted from your data."
         )
         subtitle.setWordWrap(True)
         subtitle.setObjectName("heroSubtitle")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        layout.addWidget(header)
 
         mode_row = QHBoxLayout()
         self.expert_mode_checkbox = QCheckBox("Expert mode")
@@ -86,107 +303,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
         layout.addWidget(self._build_execution_group())
         layout.addWidget(self._build_log_group(), stretch=1)
 
-        self.setStyleSheet(
-            """
-            QWidget {
-                background: #f7f6f2;
-                color: #1f2a37;
-                font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
-                font-size: 13px;
-            }
-            #heroTitle {
-                font-size: 26px;
-                font-weight: 700;
-                color: #0f1724;
-                padding: 2px 0 0 0;
-            }
-            #heroSubtitle {
-                color: #465569;
-                padding: 0 0 8px 0;
-            }
-            QGroupBox {
-                border: 1px solid #d7dde6;
-                border-radius: 8px;
-                margin-top: 8px;
-                padding-top: 12px;
-                font-weight: 600;
-                background: #ffffff;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                top: -6px;
-                padding: 0 4px;
-                color: #1c3a4d;
-                background: #f7f6f2;
-            }
-            QPushButton {
-                border: 1px solid #b8c5d3;
-                border-radius: 6px;
-                background: #ecf0f5;
-                padding: 6px 12px;
-                min-width: 96px;
-            }
-            QPushButton:hover {
-                background: #dde7f1;
-            }
-            QPushButton#generateButton {
-                background: #1e7d4f;
-                color: #ffffff;
-                border: 1px solid #19663f;
-                font-weight: 600;
-            }
-            QPushButton#generateButton:hover {
-                background: #19663f;
-            }
-            QPushButton#cancelButton {
-                background: #a9412b;
-                color: #ffffff;
-                border: 1px solid #8d3724;
-            }
-            QLineEdit, QComboBox, QSpinBox, QDateEdit, QPlainTextEdit {
-                border: 1px solid #c5cfdb;
-                border-radius: 5px;
-                background: #ffffff;
-                padding: 5px 8px;
-            }
-            QPlainTextEdit {
-                font-family: "Menlo", "Consolas", monospace;
-                font-size: 12px;
-            }
-            #statusLabel {
-                font-weight: 600;
-                color: #465569;
-                padding: 4px 0;
-            }
-            #statusLabel[status="ready"] {
-                color: #465569;
-            }
-            #statusLabel[status="running"] {
-                color: #1e7d4f;
-            }
-            #statusLabel[status="success"] {
-                color: #1e7d4f;
-            }
-            #statusLabel[status="error"] {
-                color: #a9412b;
-            }
-            #progressBar {
-                border: none;
-                background: #e8ecf1;
-                border-radius: 2px;
-            }
-            #progressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #1e7d4f, stop:1 #2a9d64);
-                border-radius: 2px;
-            }
-            QPushButton#generateButton {
-                min-height: 32px;
-                font-size: 14px;
-            }
-            """
-        )
+        self._apply_native_styling()
 
     def _build_input_group(self) -> QGroupBox:
         group = QGroupBox("Input")
@@ -441,6 +558,138 @@ class OpenSteuerAuszugWindow(QMainWindow):
         ))
         self.addAction(expert_action)
 
+    def _setup_menu_bar(self) -> None:
+        """Set up native macOS menu bar."""
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("File")
+
+        # Open action
+        open_action = QAction("Open...", self)
+        open_action.setShortcut(QKeySequence.Open)
+        open_action.triggered.connect(self._browse_input)
+        file_menu.addAction(open_action)
+
+        # Recent files submenu
+        self.recent_menu = QMenu("Open Recent", self)
+        self._update_recent_menu()
+        file_menu.addMenu(self.recent_menu)
+
+        file_menu.addSeparator()
+
+        # Close action
+        close_action = QAction("Close Window", self)
+        close_action.setShortcut(QKeySequence.Close)
+        close_action.triggered.connect(self.close)
+        file_menu.addAction(close_action)
+
+        # View menu
+        view_menu = menubar.addMenu("View")
+
+        # Expert mode toggle
+        expert_action = QAction("Expert Mode", self)
+        expert_action.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_E))
+        expert_action.setCheckable(True)
+        expert_action.triggered.connect(lambda checked: self.expert_mode_checkbox.setChecked(checked))
+        view_menu.addAction(expert_action)
+        self.expert_menu_action = expert_action
+
+        # Help menu
+        help_menu = menubar.addMenu("Help")
+
+        # Documentation
+        docs_action = QAction("Documentation", self)
+        docs_action.triggered.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/anthropics/opensteuerauszug")
+        ))
+        help_menu.addAction(docs_action)
+
+    def _load_recent_files(self) -> None:
+        """Load recent files from settings."""
+        self._recent_files = self._settings.value("recent_files", [], type=list)[:10]  # Keep last 10
+
+    def _save_recent_file(self, file_path: str) -> None:
+        """Add file to recent files list."""
+        if file_path in self._recent_files:
+            self._recent_files.remove(file_path)
+        self._recent_files.insert(0, file_path)
+        self._recent_files = self._recent_files[:10]  # Keep only 10 most recent
+        self._settings.setValue("recent_files", self._recent_files)
+        self._update_recent_menu()
+
+    def _update_recent_menu(self) -> None:
+        """Update the recent files menu."""
+        if not hasattr(self, 'recent_menu'):
+            return
+
+        self.recent_menu.clear()
+        if not self._recent_files:
+            action = QAction("No Recent Files", self)
+            action.setEnabled(False)
+            self.recent_menu.addAction(action)
+            return
+
+        for file_path in self._recent_files:
+            if Path(file_path).exists():
+                action = QAction(Path(file_path).name, self)
+                action.setData(file_path)
+                action.triggered.connect(lambda checked=False, f=file_path: self._open_recent_file(f))
+                self.recent_menu.addAction(action)
+
+        self.recent_menu.addSeparator()
+        clear_action = QAction("Clear Recent Files", self)
+        clear_action.triggered.connect(self._clear_recent_files)
+        self.recent_menu.addAction(clear_action)
+
+    def _open_recent_file(self, file_path: str) -> None:
+        """Open a file from recent files."""
+        if Path(file_path).exists():
+            self.input_path_edit.setText(file_path)
+        else:
+            QMessageBox.warning(self, "File Not Found", f"The file no longer exists:\n{file_path}")
+            self._recent_files.remove(file_path)
+            self._settings.setValue("recent_files", self._recent_files)
+            self._update_recent_menu()
+
+    def _clear_recent_files(self) -> None:
+        """Clear recent files list."""
+        self._recent_files = []
+        self._settings.setValue("recent_files", self._recent_files)
+        self._update_recent_menu()
+
+    def _restore_window_state(self) -> None:
+        """Restore window size and position from settings."""
+        geometry = self._settings.value("window_geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        else:
+            self.resize(1100, 800)
+
+    def _save_window_state(self) -> None:
+        """Save window size and position to settings."""
+        self._settings.setValue("window_geometry", self.saveGeometry())
+
+    def closeEvent(self, event) -> None:
+        """Handle window close event."""
+        self._save_window_state()
+        super().closeEvent(event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Handle drag enter event for file drops."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Handle drop event for file drops."""
+        urls = event.mimeData().urls()
+        if urls:
+            file_path = urls[0].toLocalFile()
+            if file_path:
+                self.input_path_edit.setText(file_path)
+                self._save_recent_file(file_path)
+                event.acceptProposedAction()
+
     def _wire_events(self) -> None:
         self.input_browse_btn.clicked.connect(self._browse_input)
         self.output_pdf_browse_btn.clicked.connect(self._browse_output_pdf)
@@ -549,6 +798,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
             selected = QFileDialog.getExistingDirectory(self, "Select Schwab input directory")
             if selected:
                 self.input_path_edit.setText(selected)
+                self._save_recent_file(selected)
         elif importer == "none":
             selected, _ = QFileDialog.getOpenFileName(
                 self,
@@ -558,6 +808,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
             )
             if selected:
                 self.input_path_edit.setText(selected)
+                self._save_recent_file(selected)
         else:
             selected, _ = QFileDialog.getOpenFileName(
                 self,
@@ -567,6 +818,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
             )
             if selected:
                 self.input_path_edit.setText(selected)
+                self._save_recent_file(selected)
 
     def _browse_output_pdf(self) -> None:
         selected, _ = QFileDialog.getSaveFileName(
