@@ -36,6 +36,7 @@ dependencies = [
 [project.scripts]
 # opensteuerauszug = "opensteuerauszug.cli:app"
 opensteuerauszug = "opensteuerauszug.steuerauszug:app" # Updated entry point
+opensteuerauszug-gui = "opensteuerauszug.util.gui_launcher:main"
 
 [project.urls]
 "Homepage" = "https://github.com/yourusername/opensteuerauszug" # Replace with actual URL
@@ -54,6 +55,9 @@ dev = [
     "freezegun>=1.5.0",  # Added for time-freezing in tests
     # TODO make these formal dependencies 
     # pip install git+https://github.com/vroonhof/pdf417decoder.git#subdirectory=python
+]
+gui = [
+    "PySide6>=6.6.0",
 ]
 
 [tool.black]

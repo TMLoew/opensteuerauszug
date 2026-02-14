@@ -18,6 +18,25 @@ For more information on required due diligence see the the user guide.
 
 After installing, see the [User Guide](docs/user_guide.md) for preparation steps, how to get broker data and run the command.
 
+### Desktop GUI
+
+The project includes a desktop GUI (PySide6, no Tkinter).
+
+```bash
+pip install -e ".[gui]"
+opensteuerauszug-gui
+```
+
+GUI behavior:
+- **Simple mode (default)**: only required fields (input, broker, year, outputs).
+- **Expert mode**: exposes full CLI parity (`--phases`, `--raw-import`, `--debug-dump`, `--set`, `--org-nr`, etc.).
+- Real-time run logs are streamed in-app.
+
+Security note:
+- Keep personal settings in a local file such as `config.local.toml` and select it in GUI Expert mode (or CLI `--config config.local.toml`).
+- Local sensitive artifacts are ignored via `.gitignore` (`data/*.xml`, `out/*`, manual price files, `.envrc`, etc.).
+- If your local `config.toml` or `data/security_identifiers.csv` contains personal data, do not include those edits in commits (they are tracked files).
+
 ### Verifying an Existing Steuerauszug
 
 The tool can also be used to cross check and existing existing Steuerauszug (eCH-0196 XML). See See [verify instructions](docs/verify_existing.mdverify_existing.md).
@@ -152,4 +171,3 @@ That said all mistakes, hallucinations etc are probably mine.
 See [LICENSE](LICENSE) file.
 
 Though I am not formally requiring it to keep things simple, I would prefer if you dropped me a line if this package being used or included in other software or other service (e.g. if you are financial service provider).
-

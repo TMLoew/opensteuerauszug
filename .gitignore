@@ -12,12 +12,20 @@
 
 # Manual prices CSV (may contain portfolio information)
 /data/manual_prices.csv
+/data/manual_prices_*.csv
 
 # Security identifiers (may contain personal portfolio info)
 /data/security_identifiers.csv
 
 # Configuration files (may contain personal information)
 /config.toml
+/config.local.toml
+/.envrc
+
+# Local debug / scratch output
+/debug_dump/
+/out/*
+!/out/.gitkeep
 
 # Real tax data for integration testing
 /private
