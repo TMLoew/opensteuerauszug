@@ -6,6 +6,7 @@ class GeneralSettings(BaseModel):
     canton: Optional[str] = Field(default=None, description="Your canton (e.g., 'ZH', 'BE'). If not provided, will be extracted from importer data (e.g., IBKR flex report).")
     full_name: str = Field(description="Your full name for tax documents.")
     language: str = Field(default="de", description="Default language for documents (e.g., 'de', 'fr', 'it').")
+    institution_name: Optional[str] = Field(default=None, description="Override institution name in PDF title (e.g., 'LYNX B.V.'). If not provided, uses the institution name from the broker statement.")
     processing_flags: Dict[str, bool] = Field(default_factory=dict, description="Default processing flags.")
     minimal_uses_placeholder_frontpage: bool = Field(
         default=True,

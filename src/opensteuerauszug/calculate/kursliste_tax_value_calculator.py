@@ -83,16 +83,46 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         self._previous_year_exdate_warnings = []
         result = super().calculate(tax_statement)
         if self._missing_kursliste_entries:
-            logger.warning("Missing Kursliste entries for securities:")
+            # Check if we have manual prices applied (for FillInTaxValueCalculator subclass)
+            securities_with_manual_prices = getattr(self, '_securities_with_manual_prices', [])
+
+            if securities_with_manual_prices:
+                logger.warning("Missing Kursliste entries for securities (prices applied from IBKR XML with *):")
+                for entry in securities_with_manual_prices:
+                    logger.warning("  ✓ %s [Manual price applied]", entry)
+                    result.critical_warnings.append(
+                        CriticalWarning(
+                            category=CriticalWarningCategory.MISSING_KURSLISTE,
+                            message=(
+                                f"Security {entry} was not found in the Kursliste. "
+                                "Manual price from IBKR XML was applied (*). "
+                                "Please verify this price is correct.\n"
+                                "___ITALIC_START___■ ■ ■ Wertpapier wurde nicht in der Kursliste gefunden. "
+                                "Manueller Preis aus IBKR XML wurde angewendet (*). "
+                                "Bitte überprüfen Sie, ob dieser Preis korrekt ist.___ITALIC_END___"
+                            ),
+                            source="KurslisteTaxValueCalculator",
+                            identifier=entry,
+                        )
+                    )
+                logger.warning("")
+                logger.warning("Missing Kursliste entries for securities (zero year-end position, no price needed):")
+
+            else:
+                logger.warning("Missing Kursliste entries for securities:")
+
             for entry in self._missing_kursliste_entries:
-                logger.warning("  - %s", entry)
+                logger.warning("  - %s [No year-end position]", entry)
                 result.critical_warnings.append(
                     CriticalWarning(
                         category=CriticalWarningCategory.MISSING_KURSLISTE,
                         message=(
                             f"Security {entry} was not found in the Kursliste. "
-                            "Tax values and income for this security may be "
-                            "incorrect or missing."
+                            "No year-end position held (all sold before Dec 31), so no price needed. "
+                            "Tax values for dividends/trades are calculated from transaction data.\n"
+                            "___ITALIC_START___■ ■ ■ Wertpapier wurde nicht in der Kursliste gefunden. "
+                            "Keine Jahresendposition (alles vor dem 31. Dez. verkauft), daher kein Preis erforderlich. "
+                            "Steuerwerte für Dividenden/Transaktionen werden aus Transaktionsdaten berechnet.___ITALIC_END___"
                         ),
                         source="KurslisteTaxValueCalculator",
                         identifier=entry,

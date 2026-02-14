@@ -20,6 +20,7 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
     def __init__(self, mode: CalculationMode, exchange_rate_provider: ExchangeRateProvider, flag_override_provider: Optional[FlagOverrideProvider] = None, manual_price_provider: Optional[ManualPriceProvider] = None, keep_existing_payments: bool = False):
         super().__init__(mode, exchange_rate_provider, flag_override_provider=flag_override_provider, keep_existing_payments=keep_existing_payments)
         self.manual_price_provider = manual_price_provider
+        self._securities_with_manual_prices = []  # Track which securities got manual prices
         logger.info(
             "FillInTaxValueCalculator initialized with mode: %s and provider: %s",
             mode.value,
@@ -93,6 +94,23 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
 
         if manual_price_info:
             price, currency = manual_price_info
+
+            # Track that this security got a manual price
+            security_name = getattr(self._current_security, 'securityName', 'Unknown')
+            security_isin = getattr(self._current_security, 'isin', None)
+            security_symbol = getattr(self._current_security, 'symbol', None)
+
+            # Format: "Security Name (ISIN)" or "Security Name (Symbol)" if no ISIN
+            if security_isin:
+                security_ident = f"{security_name} ({security_isin})"
+            elif security_symbol:
+                security_ident = f"{security_name} ({security_symbol})"
+            else:
+                security_ident = security_name
+
+            if security_ident not in self._securities_with_manual_prices:
+                self._securities_with_manual_prices.append(security_ident)
+
             logger.info(
                 "Applying manual price for %s on %s: %s %s",
                 self._current_security.isin,

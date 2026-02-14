@@ -1,9 +1,11 @@
 import os
+import csv
 import logging
-from typing import Final, List, Any, Dict, Literal, get_args, cast
+from typing import Final, List, Any, Dict, Literal, get_args, cast, Optional
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from collections import defaultdict
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +209,97 @@ class IbkrImporter:
         return aggregated
 
 
+    def _extract_and_save_prices(
+        self,
+        all_flex_statements: List[Any],
+        tax_year: int,
+        output_dir: Optional[Path] = None
+    ) -> None:
+        """
+        Extract year-end prices from OpenPosition data and save to CSV.
+
+        Args:
+            all_flex_statements: List of parsed IBKR Flex statements
+            tax_year: Tax year (used for file naming and date)
+            output_dir: Directory to save the CSV (default: project_root/data)
+        """
+        if not all_flex_statements:
+            return
+
+        # Determine output path
+        if output_dir is None:
+            # Get project root (go up from src/opensteuerauszug/importers/ibkr/)
+            current_file = Path(__file__)
+            project_root = current_file.parent.parent.parent.parent.parent
+            output_dir = project_root / "data"
+
+        output_path = output_dir / f"manual_prices_{tax_year}.csv"
+        target_date = f"{tax_year}-12-31"
+
+        prices = []
+
+        # Extract prices from all statements
+        for stmt in all_flex_statements:
+            if not hasattr(stmt, 'OpenPositions') or not stmt.OpenPositions:
+                continue
+
+            for open_pos in stmt.OpenPositions:
+                isin = getattr(open_pos, 'isin', None)
+                symbol = getattr(open_pos, 'symbol', 'N/A')
+                currency = getattr(open_pos, 'currency', None)
+                position_str = getattr(open_pos, 'position', None)
+                position_value_str = getattr(open_pos, 'positionValue', None)
+
+                # Skip if missing required fields
+                if not isin or not currency or not position_str or not position_value_str:
+                    continue
+
+                # Skip options (no ISIN)
+                if not isin or isin == '':
+                    continue
+
+                try:
+                    position = Decimal(str(position_str))
+                    position_value = Decimal(str(position_value_str))
+
+                    # Skip if position is zero
+                    if position == 0:
+                        continue
+
+                    # Calculate price (use absolute values for short positions)
+                    price = abs(position_value / position)
+
+                    # Round to reasonable precision
+                    if price < Decimal('1'):
+                        price = price.quantize(Decimal('0.0001'))
+                    elif price < Decimal('100'):
+                        price = price.quantize(Decimal('0.01'))
+                    else:
+                        price = price.quantize(Decimal('0.01'))
+
+                    prices.append({
+                        'isin': isin,
+                        'date': target_date,
+                        'price': str(price),
+                        'currency': currency
+                    })
+
+                except (InvalidOperation, ZeroDivisionError) as e:
+                    logger.warning(f"Could not extract price for {symbol}: {e}")
+                    continue
+
+        # Save to CSV if we have prices
+        if prices:
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, 'w', encoding='utf-8', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=['isin', 'date', 'price', 'currency'])
+                    writer.writeheader()
+                    writer.writerows(prices)
+                logger.info(f"Auto-extracted {len(prices)} prices from IBKR XML to {output_path}")
+            except Exception as e:
+                logger.warning(f"Could not save extracted prices to {output_path}: {e}")
+
     def import_files(self, filenames: List[str]) -> TaxStatement:
         """
         Import data from IBKR Flex Query XMLs and return a TaxStatement.
@@ -351,8 +444,15 @@ class IbkrImporter:
                     currency = self._get_required_field(
                         trade, 'currency', 'Trade'
                     )
-                    # 'BUY' or 'SELL'
-                    buy_sell = self._get_required_field(trade, 'buySell', 'Trade')
+                    # 'BUY' or 'SELL' - infer from quantity sign if missing (malformed IBKR data)
+                    buy_sell = trade.buySell if hasattr(trade, 'buySell') and trade.buySell else None
+                    if not buy_sell:
+                        # Infer from quantity: negative = SELL, positive = BUY
+                        buy_sell = "SELL" if quantity < 0 else "BUY"
+                        logger.warning(
+                            f"Missing buySell field for Trade (Symbol: {symbol}), "
+                            f"inferred '{buy_sell}' from quantity {quantity}"
+                        )
 
                     ib_commission = self._to_decimal(
                         trade.ibCommission if trade.ibCommission is not None else '0',
@@ -622,6 +722,18 @@ class IbkrImporter:
                 for cash_tx in stmt.CashTransactions:
                     if should_skip_entry(cash_tx, "CashTransaction"):
                         continue
+
+                    # Skip transactions with empty dateTime (malformed IBKR data)
+                    # These often appear as duplicates with a valid entry following
+                    if hasattr(cash_tx, 'dateTime') and not cash_tx.dateTime:
+                        logger.warning(
+                            f"Skipping CashTransaction with empty dateTime: "
+                            f"Symbol={getattr(cash_tx, 'symbol', 'N/A')}, "
+                            f"Amount={getattr(cash_tx, 'amount', 'N/A')}, "
+                            f"Type={getattr(cash_tx, 'type', 'N/A')}"
+                        )
+                        continue
+
                     tx_date_time = self._get_required_field(
                         cash_tx, 'dateTime', 'CashTransaction'
                     )
@@ -702,6 +814,10 @@ class IbkrImporter:
                         elif tx_type in [ibflex.CashAction.BROKERINTRCVD]:
                             # Tax relevant event. Fall through to create a bank payment.
                             pass
+                        elif tx_type in [ibflex.CashAction.WHTAX]:
+                            # Withholding tax on interest - already accounted for in net interest received
+                            logger.debug(f"Withholding tax on interest for {description} is ignored (already netted).")
+                            continue
                         else:
                             raise ValueError(f"CashTransaction type {tx_type} is not supported for {description}")
                         cash_pos_key = (account_id, currency, "MAIN_CASH")
@@ -784,12 +900,14 @@ class IbkrImporter:
                 opening_balance = start_pos.quantity
             else:
                 tentative_opening = closing_balance - trades_quantity_total
-                opening_balance = tentative_opening if tentative_opening >= 0 else Decimal("0")
+                # Allow negative balances for short positions
+                opening_balance = tentative_opening
 
+            # Log negative balances (short positions) but don't fail
             if opening_balance < 0 or closing_balance < 0:
-                raise ValueError(
-                    f"Negative balance computed for security {sec_pos_obj.symbol}"
-                    f" (start {opening_balance}, end {closing_balance})"
+                logger.info(
+                    f"Short position detected for security {sec_pos_obj.symbol} "
+                    f"(start {opening_balance}, end {closing_balance})"
                 )
 
             # Check if this is a rights issue and if we should skip it
@@ -1099,6 +1217,13 @@ class IbkrImporter:
         if client_obj:
             tax_statement.client = [client_obj]
         # --- End Client object ---
+
+        # Auto-extract and save prices from OpenPosition data
+        tax_year = self.period_to.year
+        try:
+            self._extract_and_save_prices(all_flex_statements, tax_year)
+        except Exception as e:
+            logger.warning(f"Could not auto-extract prices: {e}")
 
         return tax_statement
 

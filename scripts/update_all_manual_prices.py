@@ -116,14 +116,16 @@ def main():
     parser.add_argument(
         '--csv',
         type=Path,
-        help='Path to manual_prices.csv (default: data/manual_prices.csv)'
+        help='Path to manual_prices.csv (default: data/manual_prices_YYYY.csv where YYYY is the tax year)'
     )
 
     args = parser.parse_args()
 
     # Determine paths
     project_root = get_project_root()
-    csv_path = args.csv if args.csv else project_root / 'data' / 'manual_prices.csv'
+    # Use year-specific CSV file by default
+    default_csv_name = f'manual_prices_{args.year}.csv'
+    csv_path = args.csv if args.csv else project_root / 'data' / default_csv_name
 
     # Target date (end of year)
     target_date = date(args.year, 12, 31)

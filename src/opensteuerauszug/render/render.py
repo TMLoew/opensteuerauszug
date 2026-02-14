@@ -311,12 +311,10 @@ def draw_page_header(canvas, doc, is_barcode_page: bool = False):
     if hasattr(doc, 'tax_statement') and doc.tax_statement:
         # Get custom styles for header text
         styles = get_custom_styles()
-        
-        # Institution name in big font
-        institution_name = ""
-        if hasattr(doc.tax_statement, 'institution') and doc.tax_statement.institution:
-            institution_name = doc.tax_statement.institution.name if hasattr(doc.tax_statement.institution, 'name') else ""
-        
+
+        # Institution name in big font (use doc.company_name which includes override)
+        institution_name = doc.company_name if hasattr(doc, 'company_name') and doc.company_name else ""
+
         if institution_name:
             institution_style = styles['HeaderInstitution']
             canvas.setFont(institution_style.fontName, institution_style.fontSize)
@@ -787,10 +785,23 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
     ]
 
     for w in warnings:
-        escaped_msg = escape_html_for_paragraph(w.message)
+        # Check if message contains formatting markers (___ITALIC_START___ and ___ITALIC_END___)
+        msg = w.message
+        if '___ITALIC_START___' in msg and '___ITALIC_END___' in msg:
+            # Split by markers and format accordingly
+            parts = msg.split('___ITALIC_START___')
+            formatted_msg = escape_html_for_paragraph(parts[0])
+            if len(parts) > 1:
+                italic_parts = parts[1].split('___ITALIC_END___')
+                formatted_msg += f"<i>{escape_html_for_paragraph(italic_parts[0])}</i>"
+                if len(italic_parts) > 1:
+                    formatted_msg += escape_html_for_paragraph(italic_parts[1])
+        else:
+            formatted_msg = escape_html_for_paragraph(msg)
+
         inner.append(
             Paragraph(
-                f"&bull; {escaped_msg}",
+                f"&bull; {formatted_msg}",
                 warning_item_style,
             )
         )
@@ -1550,16 +1561,18 @@ def render_tax_statement(
     output_path: Union[str, Path],
     override_org_nr: Optional[str] = None,
     minimal_frontpage_placeholder: bool = False,
+    institution_name_override: Optional[str] = None,
 ) -> Path:
     """Render a tax statement to PDF.
-    
+
     Args:
         tax_statement: The TaxStatement model to render
         output_path: Path where to save the generated PDF
         override_org_nr: Optional override for organization number (5 digits)
         minimal_frontpage_placeholder: If True, replace the summary on the first
             page with a placeholder suitable for minimal tax statements
-        
+        institution_name_override: Optional override for institution name in PDF title
+
     Returns:
         Path to the generated PDF file
     """
@@ -1600,13 +1613,15 @@ def render_tax_statement(
     
     # Compute the organization number
     doc.org_nr = compute_org_nr(tax_statement, override_org_nr)
-    doc.company_name = tax_statement.institution.name if tax_statement.institution else ""
+
+    # Set company name (used in footer and header) - use override if provided
+    company_name = institution_name_override if institution_name_override else (tax_statement.institution.name if tax_statement.institution else "")
+    doc.company_name = company_name
 
     # Store tax statement for header access
     doc.tax_statement = tax_statement
 
     # Set the PDF title using institution name and tax year
-    company_name = tax_statement.institution.name if tax_statement.institution else ""
     tax_year = str(tax_statement.taxPeriod) if tax_statement.taxPeriod else ""
     title_parts = ["Steuerauszug", company_name, tax_year]
     doc.title = " ".join(part for part in title_parts if part)

@@ -148,7 +148,7 @@ echo ""
 # Step 4: Summary
 echo "Step 4/4: Summary"
 echo "----------------------------------------"
-echo "✓ Manual prices updated in data/manual_prices.csv"
+echo "✓ Manual prices updated in data/manual_prices_${YEAR}.csv"
 echo "✓ Tax statement generated:"
 echo "  - PDF: $OUTPUT_PDF"
 echo "  - XML: $OUTPUT_XML"

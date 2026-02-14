@@ -33,7 +33,15 @@ from .config import ConfigManager, ConcreteAccountSettings
 
 logger = logging.getLogger(__name__)
 
-app = typer.Typer()
+app = typer.Typer(
+    help="""
+OpenSteuerAuszug - Swiss Tax Statement Generator
+
+Generate Swiss tax statements (eCH-0196 format) from broker statements.
+Supports IBKR and Schwab brokers with automatic Kursliste integration.
+    """,
+    add_completion=False,
+)
 
 class Phase(str, Enum):
     IMPORT = "import"
@@ -62,6 +70,126 @@ class LogLevel(str, Enum):
 
 default_phases = [Phase.IMPORT, Phase.VALIDATE, Phase.CALCULATE, Phase.RENDER]
 
+@app.command(name="info")
+def show_info():
+    """
+    Display comprehensive help and usage information for OpenSteuerAuszug.
+
+    Shows detailed information about:
+    - Basic usage examples
+    - Converting Kursliste XML to SQLite
+    - Manual price management
+    - Configuration options
+    """
+    help_text = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        OpenSteuerAuszug - Help Guide                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+BASIC USAGE
+-----------
+Generate a tax statement from your broker data:
+
+  python -m opensteuerauszug.steuerauszug \\
+    --importer ibkr \\
+    --output out/steuerauszug.pdf \\
+    --xml-output out/steuerauszug.xml \\
+    --period-from 2025-01-01 \\
+    --period-to 2025-12-31 \\
+    data/ibkr_statement.xml
+
+For Schwab:
+  python -m opensteuerauszug.steuerauszug \\
+    --importer schwab \\
+    --output out/steuerauszug.pdf \\
+    data/schwab_directory/
+
+
+KURSLISTE CONVERSION
+--------------------
+Convert the official Swiss Kursliste XML to SQLite for faster lookups:
+
+1. Download Kursliste XML from ESTV:
+   https://www.estv.admin.ch/estv/de/home/verrechnungssteuer/dienstleistungen/wertschriftenliste.html
+
+2. Convert to SQLite:
+   python scripts/convert_kursliste_to_sqlite.py \\
+     data/kursliste/kursliste_2025.xml \\
+     data/kursliste/kursliste_2025.sqlite
+
+3. The tool will automatically use SQLite files in data/kursliste/
+
+
+MANUAL PRICES
+-------------
+For securities not in the Kursliste, add manual prices:
+
+1. Create data/manual_prices.csv:
+   isin,date,price,currency
+   US88160R1014,2025-12-31,350.25,USD
+
+2. Automatic price fetching with Yahoo Finance:
+   python scripts/update_all_manual_prices.py --year 2025
+
+3. Complete workflow (extract missing → fetch prices → regenerate):
+   bash scripts/update_prices_workflow.sh 2025
+
+
+KEY OPTIONS
+-----------
+  --importer ibkr|schwab    Broker type
+  --output FILE             Output PDF path
+  --xml-output FILE         Output XML path (optional)
+  --period-from DATE        Start date (YYYY-MM-DD)
+  --period-to DATE          End date (YYYY-MM-DD)
+  --tax-calculation-level   none|minimal|kursliste|fillin (default: kursliste)
+  --config FILE             Config file (default: config.toml)
+  --kursliste-dir DIR       Kursliste directory (default: data/kursliste)
+
+
+CONFIGURATION
+-------------
+Edit config.toml to set:
+  - Your name and canton
+  - Institution name override (e.g., "LYNX B.V.")
+  - Security identifier mappings
+  - Flag overrides for specific securities
+
+Example config.toml:
+  [general]
+  canton = "ZH"
+  full_name = "Your Name"
+  institution_name = "LYNX B.V."
+
+
+SCRIPTS
+-------
+Located in scripts/:
+  - convert_kursliste_to_sqlite.py  : Convert Kursliste XML to SQLite
+  - fetch_prices_yfinance.py        : Fetch individual security prices
+  - update_all_manual_prices.py     : Batch update manual prices
+  - extract_missing_securities.py   : Auto-extract missing securities
+  - update_prices_workflow.sh       : Complete automation workflow
+
+
+MORE HELP
+---------
+  Main command options:
+    python -m opensteuerauszug.steuerauszug --help
+
+  GitHub repository:
+    https://github.com/vroonhof/opensteuerauszug
+
+  Documentation:
+    See README.md and docs/ directory
+
+  Issue tracker:
+    https://github.com/vroonhof/opensteuerauszug/issues
+
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+    print(help_text)
+
 @app.command()
 def main(
     input_file: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=True, readable=True, help="Input file (specific format depends on importer, or XML for raw) or directory (for Schwab importer)."),
@@ -88,6 +216,7 @@ def main(
     override_configs: List[str] = typer.Option(None, "--set", help="Override configuration settings using path.to.key=value format. Can be used multiple times."),
     kursliste_dir: Path = typer.Option(Path("data/kursliste"), "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. Defaults to 'data/kursliste'."),
     org_nr: Optional[str] = typer.Option(None, "--org-nr", help="Override the organization number used in barcodes (5-digit number)"),
+    institution_name: Optional[str] = typer.Option(None, "--institution-name", help="Override the institution name (e.g., 'LYNX B.V.'). Takes precedence over config.toml setting."),
 ):
     """Processes financial data to generate a Swiss tax statement (Steuerauszug)."""
     logging.basicConfig(level=log_level.value)
@@ -404,12 +533,20 @@ def main(
             src_opensteuerauszug_dir = os.path.dirname(cli_py_file_path)
             src_dir = os.path.dirname(src_opensteuerauszug_dir)
             project_root_dir = os.path.dirname(src_dir)
-            manual_prices_csv_path = os.path.join(project_root_dir, "data", "manual_prices.csv")
+            manual_prices_dir = os.path.join(project_root_dir, "data")
+
+            # Determine the tax year for loading year-specific manual prices
+            effective_tax_year = tax_year if tax_year else (parsed_period_to.year if parsed_period_to else None)
+
             try:
                 manual_price_provider = ManualPriceProvider(
-                    csv_path=manual_prices_csv_path
+                    csv_path=manual_prices_dir,
+                    tax_year=effective_tax_year
                 )
-                print("ManualPriceProvider initialized successfully.")
+                if effective_tax_year:
+                    print(f"ManualPriceProvider initialized for tax year {effective_tax_year}.")
+                else:
+                    print("ManualPriceProvider initialized (no tax year specified).")
             except Exception as e:
                 print(f"Warning: Could not initialize ManualPriceProvider: {e}")
 
@@ -572,6 +709,15 @@ def main(
                         general_config_settings.minimal_uses_placeholder_frontpage
                         if general_config_settings
                         else True
+                    )
+                ),
+                institution_name_override=(
+                    institution_name  # Command-line takes precedence
+                    if institution_name
+                    else (
+                        general_config_settings.institution_name
+                        if general_config_settings and hasattr(general_config_settings, 'institution_name')
+                        else None
                     )
                 ),
             )
