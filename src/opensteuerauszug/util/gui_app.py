@@ -53,6 +53,9 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self._manual_xml_output = False
         self._settings = QSettings("OpenSteuerAuszug", "OpenSteuerAuszug")
         self._recent_files: list[str] = []
+        self._data_folder: Path = Path(
+            self._settings.value("data_folder", str(Path.cwd() / "data"))
+        )
         self._load_recent_files()
         self._restore_window_state()
         self._build_ui()
@@ -457,17 +460,34 @@ class OpenSteuerAuszugWindow(QMainWindow):
             "Useful for correcting broker names (e.g., 'LYNX B.V.' instead of 'Interactive Brokers')"
         )
 
+        # Data folder quick-select
+        self.data_folder_combo = QComboBox()
+        self.data_folder_combo.setToolTip("Select a file from the configured data folder")
+        self.data_folder_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+        data_folder_btn_row = QHBoxLayout()
+        self.data_folder_refresh_btn = QPushButton("⟳")
+        self.data_folder_refresh_btn.setFixedWidth(32)
+        self.data_folder_refresh_btn.setToolTip("Rescan the data folder")
+        self.data_folder_change_btn = QPushButton("Folder…")
+        self.data_folder_change_btn.setToolTip("Choose a different data folder to scan for broker files")
+        data_folder_btn_row.addWidget(self.data_folder_combo)
+        data_folder_btn_row.addWidget(self.data_folder_refresh_btn)
+        data_folder_btn_row.addWidget(self.data_folder_change_btn)
+
         grid.addWidget(QLabel("Input file/directory"), 0, 0)
         grid.addWidget(self.input_path_edit, 0, 1)
         grid.addWidget(self.input_browse_btn, 0, 2)
-        grid.addWidget(QLabel("Broker importer"), 1, 0)
-        grid.addWidget(self.importer_combo, 1, 1)
-        grid.addWidget(QLabel("Tax year"), 2, 0)
-        grid.addWidget(self.tax_year_spin, 2, 1)
-        grid.addWidget(QLabel("Tax calculation level"), 3, 0)
-        grid.addWidget(self.tax_calc_combo, 3, 1)
-        grid.addWidget(QLabel("Institution name override"), 4, 0)
-        grid.addWidget(self.institution_name_edit, 4, 1, 1, 2)
+        grid.addWidget(QLabel("Select from data folder"), 1, 0)
+        grid.addLayout(data_folder_btn_row, 1, 1, 1, 2)
+        grid.addWidget(QLabel("Broker importer"), 2, 0)
+        grid.addWidget(self.importer_combo, 2, 1)
+        grid.addWidget(QLabel("Tax year"), 3, 0)
+        grid.addWidget(self.tax_year_spin, 3, 1)
+        grid.addWidget(QLabel("Tax calculation level"), 4, 0)
+        grid.addWidget(self.tax_calc_combo, 4, 1)
+        grid.addWidget(QLabel("Institution name override"), 5, 0)
+        grid.addWidget(self.institution_name_edit, 5, 1, 1, 2)
         return group
 
     def _build_output_group(self) -> QGroupBox:
@@ -824,6 +844,10 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 event.acceptProposedAction()
 
     def _wire_events(self) -> None:
+        self.data_folder_refresh_btn.clicked.connect(self._refresh_data_folder_combo)
+        self.data_folder_change_btn.clicked.connect(self._browse_data_folder)
+        self.data_folder_combo.currentIndexChanged.connect(self._on_data_folder_selected)
+        self.importer_combo.currentIndexChanged.connect(self._refresh_data_folder_combo)
         self.input_browse_btn.clicked.connect(self._browse_input)
         self.output_pdf_browse_btn.clicked.connect(self._browse_output_pdf)
         self.output_xml_browse_btn.clicked.connect(self._browse_output_xml)
@@ -878,6 +902,7 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self._update_period_enabled_state()
         self._update_phases_enabled_state()
         self._update_mode_visibility()
+        self._refresh_data_folder_combo()
 
     def _update_period_enabled_state(self) -> None:
         enabled = self.use_explicit_period_checkbox.isChecked()
@@ -924,6 +949,60 @@ class OpenSteuerAuszugWindow(QMainWindow):
 
     def _current_tax_level(self) -> str:
         return str(self.tax_calc_combo.currentData())
+
+    # ------------------------------------------------------------------
+    # Data folder helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_data_folder_combo(self) -> None:
+        """Scan the data folder and populate the quick-select combobox."""
+        self.data_folder_combo.blockSignals(True)
+        self.data_folder_combo.clear()
+
+        folder = self._data_folder
+        broker = self._current_importer()
+
+        if not folder.exists():
+            self.data_folder_combo.addItem(f"(folder not found: {folder})")
+            self.data_folder_combo.blockSignals(False)
+            return
+
+        entries: list[Path] = []
+        if broker == "schwab":
+            # Schwab uses directories
+            entries = sorted(p for p in folder.iterdir() if p.is_dir())
+        elif broker == "ibkr":
+            entries = sorted(p for p in folder.glob("*.xml"))
+        else:
+            # Show everything for 'none'
+            entries = sorted(folder.iterdir())
+
+        self.data_folder_combo.addItem(f"— {folder.name}/ ({len(entries)} files) —", None)
+        for entry in entries:
+            self.data_folder_combo.addItem(entry.name, str(entry))
+
+        self.data_folder_combo.blockSignals(False)
+
+    def _on_data_folder_selected(self, index: int) -> None:
+        """Fill input path when user picks an entry from the data folder combo."""
+        path = self.data_folder_combo.itemData(index)
+        if path:
+            self.input_path_edit.setText(path)
+            self._save_recent_file(path)
+
+    def _browse_data_folder(self) -> None:
+        """Let user choose a different data folder to scan."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select data folder", str(self._data_folder)
+        )
+        if folder:
+            self._data_folder = Path(folder)
+            self._settings.setValue("data_folder", folder)
+            self._refresh_data_folder_combo()
+
+    # ------------------------------------------------------------------
+    # File browsing
+    # ------------------------------------------------------------------
 
     def _browse_input(self) -> None:
         importer = self._current_importer()

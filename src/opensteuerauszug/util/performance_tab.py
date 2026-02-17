@@ -237,8 +237,8 @@ _COLUMNS = [
     ("Buys (CCY)", "buys_native"),
     ("Sells (CCY)", "sells_native"),
     ("Dividends (CCY)", "dividends_native"),
-    ("Realized P&L", "realized_pl_native"),
-    ("Unrealized P&L", "unrealized_pl_native"),
+    ("Realized P&L (CCY)", "realized_pl_native"),
+    ("Unrealized P&L (CCY)", "unrealized_pl_native"),
     ("Total P&L (CCY)", "total_pl_native"),
     ("Total P&L (CHF)", "total_pl_chf"),
     ("Return %", "return_pct"),
@@ -422,7 +422,7 @@ class PerformanceTab(QWidget):
                     item.setTextAlignment(0x0082)  # AlignRight | AlignVCenter
 
                     # Color code P&L columns
-                    if header in ("Realized P&L", "Unrealized P&L", "Total P&L (CCY)", "Total P&L (CHF)", "Return %"):
+                    if header in ("Realized P&L (CCY)", "Unrealized P&L (CCY)", "Total P&L (CCY)", "Total P&L (CHF)", "Return %"):
                         try:
                             v = float(str(raw)) if raw is not None else 0.0
                             item.setForeground(_GREEN if v >= 0 else _RED)
