@@ -43,6 +43,23 @@ Supports IBKR and Schwab brokers with automatic Kursliste integration.
     add_completion=False,
 )
 
+
+@app.callback(invoke_without_command=True)
+def _root_callback(
+    ctx: typer.Context,
+    gui: bool = typer.Option(False, "--gui", "-g", help="Launch the graphical user interface."),
+) -> None:
+    """If -g/--gui is passed, launch the GUI and exit immediately."""
+    if gui:
+        from opensteuerauszug.util.gui_launcher import main as _launch
+        raise typer.Exit(code=_launch())
+    # No -g: let Typer continue to the invoked subcommand.
+    # If no subcommand was given either, show the help.
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+
+
 class Phase(str, Enum):
     IMPORT = "import"
     VALIDATE = "validate"
