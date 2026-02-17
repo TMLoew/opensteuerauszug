@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QDate, QEvent, QProcess, QSettings, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -52,6 +52,9 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self._manual_pdf_output = False
         self._manual_xml_output = False
         self._settings = QSettings("OpenSteuerAuszug", "OpenSteuerAuszug")
+        # Detect initial dark/light mode from system palette
+        _sys_palette = QPalette()
+        self._is_dark_mode: bool = _sys_palette.color(QPalette.ColorRole.Window).lightness() < 128
         self._recent_files: list[str] = []
         self._data_folder: Path = Path(
             self._settings.value("data_folder", str(Path.cwd() / "data"))
@@ -67,80 +70,116 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self.setAcceptDrops(True)
 
     def _apply_native_styling(self) -> None:
-        """Apply native macOS styling with dark mode support."""
-        # Use system palette for automatic dark mode support
+        """Apply native macOS styling. Uses _is_dark_mode flag for theme."""
         app = QApplication.instance()
         if app:
-            app.setStyle("Fusion")  # Fusion style works better with custom palettes
+            app.setStyle("Fusion")
 
-        # Detect if dark mode is active
-        palette = self.palette()
-        is_dark = palette.color(QPalette.Window).lightness() < 128
+        # Hardcoded color palettes – dark/light
+        if self._is_dark_mode:
+            bg_window  = "#1c1c1e"
+            bg_base    = "#2c2c2e"
+            bg_alt     = "#252527"
+            bg_button  = "#3a3a3c"
+            bg_hover   = "#48484a"
+            bg_mid     = "#48484a"
+            text       = "#ffffff"
+            text_mid   = "#8e8e93"
+            border     = "#3a3a3c"
+            border_hi  = "#636366"
+            arrow_clr  = "#aaaaaa"
+        else:
+            bg_window  = "#f2f2f7"
+            bg_base    = "#ffffff"
+            bg_alt     = "#f8f8f8"
+            bg_button  = "#e5e5ea"
+            bg_hover   = "#d1d1d6"
+            bg_mid     = "#c7c7cc"
+            text       = "#000000"
+            text_mid   = "#6e6e73"
+            border     = "#c7c7cc"
+            border_hi  = "#aeaeb2"
+            arrow_clr  = "#888888"
 
-        # Native macOS-style stylesheet that adapts to system theme
-        stylesheet = """
-            QMainWindow {
-                background-color: palette(window);
-            }
-            QWidget {
+        # Build SVG arrows with theme-appropriate colour
+        import base64
+        def _svg_b64(svg: str) -> str:
+            return base64.b64encode(svg.encode()).decode()
+
+        checkmark_svg = _svg_b64(
+            '<svg width="12" height="9" viewBox="0 0 12 9" fill="none" xmlns="http://www.w3.org/2000/svg">'
+            '<path d="M1 4.5L4.5 8L11 1" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+            '</svg>'
+        )
+        arrow_svg = _svg_b64(
+            f'<svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">'
+            f'<path d="M1 1L5 5L9 1" stroke="{arrow_clr}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+            f'</svg>'
+        )
+
+        stylesheet = f"""
+            QMainWindow, QWidget {{
+                background-color: {bg_window};
+                color: {text};
                 font-family: ".AppleSystemUIFont", "Helvetica Neue", sans-serif;
                 font-size: 13px;
-                color: palette(text);
-            }
-            QLabel {
+            }}
+            QLabel {{
                 padding-right: 8px;
-            }
-            #heroTitle {
+                color: {text};
+            }}
+            #heroTitle {{
                 font-size: 28px;
                 font-weight: 600;
-                color: palette(text);
+                color: {text};
                 padding: 8px 0 4px 0;
                 letter-spacing: -0.5px;
-            }
-            #heroSubtitle {
+            }}
+            #heroSubtitle {{
                 font-size: 13px;
-                color: palette(mid);
+                color: {text_mid};
                 padding: 0 0 16px 0;
-                line-height: 1.5;
-            }
-            QGroupBox {
-                border: 1px solid palette(mid);
+            }}
+            QGroupBox {{
+                border: 1px solid {border};
                 border-radius: 10px;
                 margin-top: 16px;
                 padding-top: 20px;
                 font-weight: 600;
-                background: palette(base);
+                background: {bg_base};
                 font-size: 13px;
-            }
-            QGroupBox::title {
+                color: {text};
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
                 left: 12px;
                 top: 0px;
                 padding: 2px 8px;
-                background: palette(window);
-                color: palette(text);
-            }
-            QPushButton {
-                border: 1px solid palette(mid);
+                background: {bg_window};
+                color: {text};
+            }}
+            QPushButton {{
+                border: 1px solid {border};
                 border-radius: 6px;
-                background: palette(button);
+                background: {bg_button};
+                color: {text};
                 padding: 7px 16px;
-                min-width: 100px;
+                min-width: 80px;
                 font-weight: 500;
-            }
-            QPushButton:hover {
-                background: palette(light);
-                border-color: palette(dark);
-            }
-            QPushButton:pressed {
-                background: palette(mid);
-            }
-            QPushButton:disabled {
-                color: palette(mid);
-                border-color: palette(midlight);
-            }
-            QPushButton#generateButton {
+            }}
+            QPushButton:hover {{
+                background: {bg_hover};
+                border-color: {border_hi};
+            }}
+            QPushButton:pressed {{
+                background: {bg_mid};
+            }}
+            QPushButton:disabled {{
+                color: {text_mid};
+                border-color: {border};
+            }}
+            QPushButton#generateButton {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #34c759, stop:1 #30b350);
                 color: white;
@@ -148,217 +187,163 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 font-weight: 600;
                 min-height: 36px;
                 font-size: 14px;
-            }
-            QPushButton#generateButton:hover {
+            }}
+            QPushButton#generateButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #30b350, stop:1 #2ea043);
-            }
-            QPushButton#generateButton:pressed {
-                background: #2ea043;
-            }
-            QPushButton#cancelButton {
+            }}
+            QPushButton#generateButton:pressed {{ background: #2ea043; }}
+            QPushButton#cancelButton {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #ff3b30, stop:1 #e6352b);
                 color: white;
                 border: 1px solid #d92b21;
-            }
-            QPushButton#cancelButton:hover {
+            }}
+            QPushButton#cancelButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #e6352b, stop:1 #d92b21);
-            }
-            QLineEdit, QComboBox, QSpinBox, QDateEdit {
-                border: 1px solid palette(mid);
+            }}
+            QLineEdit, QComboBox, QSpinBox, QDateEdit {{
+                border: 1px solid {border};
                 border-radius: 6px;
-                background: palette(base);
+                background: {bg_base};
+                color: {text};
                 padding: 6px 10px;
                 selection-background-color: #007aff;
                 selection-color: white;
-            }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus {
+            }}
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus {{
                 border: 2px solid #007aff;
                 padding: 5px 9px;
-            }
-            QPlainTextEdit {
+            }}
+            QAbstractItemView {{
+                background: {bg_base};
+                color: {text};
+                selection-background-color: #007aff;
+                selection-color: white;
+                border: 1px solid {border};
+            }}
+            QPlainTextEdit {{
                 font-family: "Monaco", "Menlo", "Consolas", monospace;
                 font-size: 11px;
-                border: 1px solid palette(mid);
+                border: 1px solid {border};
                 border-radius: 6px;
-                background: palette(base);
+                background: {bg_base};
+                color: {text};
                 padding: 8px;
                 selection-background-color: #007aff;
                 selection-color: white;
-            }
-            QPlainTextEdit#commandPreview {
-                font-size: 10px;
-                min-height: 60px;
-            }
-            QPlainTextEdit#logOutput {
-                min-height: 200px;
-            }
-            QCheckBox {
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
+            }}
+            QPlainTextEdit#commandPreview {{ font-size: 10px; min-height: 60px; }}
+            QPlainTextEdit#logOutput {{ min-height: 200px; }}
+            QCheckBox {{ spacing: 6px; color: {text}; }}
+            QCheckBox::indicator {{
+                width: 18px; height: 18px;
                 border-radius: 4px;
-                border: 1px solid palette(mid);
-                background: palette(base);
-            }
-            QCheckBox::indicator:checked {
+                border: 1px solid {border};
+                background: {bg_base};
+            }}
+            QCheckBox::indicator:checked {{
                 background: #007aff;
                 border-color: #007aff;
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDQuNUw0LjUgOEwxMSAxIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L3N2Zz4K);
-            }
-            #statusLabel {
-                font-weight: 600;
-                font-size: 13px;
-                padding: 6px 0;
-            }
-            #statusLabel[status="ready"] {
-                color: palette(mid);
-            }
-            #statusLabel[status="running"] {
-                color: #34c759;
-            }
-            #statusLabel[status="success"] {
-                color: #34c759;
-            }
-            #statusLabel[status="error"] {
-                color: #ff3b30;
-            }
-            #progressBar {
+                image: url(data:image/svg+xml;base64,{checkmark_svg});
+            }}
+            #statusLabel {{ font-weight: 600; font-size: 13px; padding: 6px 0; }}
+            #statusLabel[status="ready"]   {{ color: {text_mid}; }}
+            #statusLabel[status="running"] {{ color: #34c759; }}
+            #statusLabel[status="success"] {{ color: #34c759; }}
+            #statusLabel[status="error"]   {{ color: #ff3b30; }}
+            #progressBar {{
                 border: none;
-                background: palette(midlight);
+                background: {bg_mid};
                 border-radius: 2px;
-                min-height: 4px;
-                max-height: 4px;
-            }
-            #progressBar::chunk {
+                min-height: 4px; max-height: 4px;
+            }}
+            #progressBar::chunk {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #34c759, stop:1 #30b350);
                 border-radius: 2px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xIDFMNSA1TDkgMSIgc3Ryb2tlPSIjODg4ODg4IiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L3N2Zz4K);
-            }
-            QMenuBar {
-                background: transparent;
-                border: none;
-            }
-            QMenuBar::item {
-                padding: 4px 10px;
-                background: transparent;
-            }
-            QMenuBar::item:selected {
-                background: palette(highlight);
-                color: palette(highlighted-text);
-            }
-            QMenu {
-                background: palette(base);
-                border: 1px solid palette(mid);
+            }}
+            QComboBox::drop-down {{ border: none; width: 20px; }}
+            QComboBox::down-arrow {{
+                image: url(data:image/svg+xml;base64,{arrow_svg});
+            }}
+            QMenuBar {{ background: transparent; border: none; }}
+            QMenuBar::item {{ padding: 4px 10px; background: transparent; color: {text}; }}
+            QMenuBar::item:selected {{ background: #007aff; color: white; }}
+            QMenu {{
+                background: {bg_base};
+                border: 1px solid {border};
                 border-radius: 6px;
                 padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 24px 6px 12px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background: #007aff;
-                color: white;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: palette(mid);
-                margin: 4px 8px;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: palette(base);
-                width: 12px;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:vertical {
-                background: palette(mid);
-                min-height: 30px;
-                border-radius: 6px;
-                margin: 2px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: palette(dark);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar:horizontal {
-                border: none;
-                background: palette(base);
-                height: 12px;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:horizontal {
-                background: palette(mid);
-                min-width: 30px;
-                border-radius: 6px;
-                margin: 2px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: palette(dark);
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
-            }
-            QScrollArea {
-                border: none;
-                background: transparent;
-            }
-            QTabWidget::pane {
-                border: 1px solid palette(mid);
+                color: {text};
+            }}
+            QMenu::item {{ padding: 6px 24px 6px 12px; border-radius: 4px; }}
+            QMenu::item:selected {{ background: #007aff; color: white; }}
+            QMenu::separator {{ height: 1px; background: {border}; margin: 4px 8px; }}
+            QScrollBar:vertical {{
+                border: none; background: {bg_base};
+                width: 12px; border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {bg_mid}; min-height: 30px;
+                border-radius: 6px; margin: 2px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {border_hi}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+            QScrollBar:horizontal {{
+                border: none; background: {bg_base};
+                height: 12px; border-radius: 6px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {bg_mid}; min-width: 30px;
+                border-radius: 6px; margin: 2px;
+            }}
+            QScrollBar::handle:horizontal:hover {{ background: {border_hi}; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+            QScrollArea {{ border: none; background: transparent; }}
+            QTabWidget::pane {{
+                border: 1px solid {border};
                 border-radius: 8px;
-                background: palette(window);
-            }
-            QTabBar::tab {
-                background: palette(button);
-                color: palette(text);
-                border: 1px solid palette(mid);
+                background: {bg_window};
+            }}
+            QTabBar::tab {{
+                background: {bg_button};
+                color: {text};
+                border: 1px solid {border};
                 border-bottom: none;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 padding: 6px 20px;
                 margin-right: 2px;
                 font-size: 13px;
-            }
-            QTabBar::tab:selected {
-                background: palette(window);
-                font-weight: 600;
-            }
-            QTabBar::tab:hover:!selected {
-                background: palette(light);
-            }
-            QTableWidget {
-                border: 1px solid palette(mid);
+            }}
+            QTabBar::tab:selected {{ background: {bg_window}; font-weight: 600; }}
+            QTabBar::tab:hover:!selected {{ background: {bg_hover}; }}
+            QTableWidget {{
+                border: 1px solid {border};
                 border-radius: 6px;
-                gridline-color: palette(mid);
-                background: palette(base);
-                alternate-background-color: palette(window);
-            }
-            QHeaderView::section {
-                background: palette(button);
-                color: palette(text);
+                gridline-color: {border};
+                background: {bg_base};
+                color: {text};
+                alternate-background-color: {bg_alt};
+            }}
+            QHeaderView::section {{
+                background: {bg_button};
+                color: {text};
                 border: none;
-                border-right: 1px solid palette(mid);
-                border-bottom: 1px solid palette(mid);
+                border-right: 1px solid {border};
+                border-bottom: 1px solid {border};
                 padding: 4px 8px;
                 font-weight: 600;
                 font-size: 12px;
-            }
+            }}
         """
         self.setStyleSheet(stylesheet)
+
+        # Update toggle button label if it exists
+        if hasattr(self, "theme_btn"):
+            self.theme_btn.setText("☀  Light" if self._is_dark_mode else "🌙  Dark")
 
     def _build_ui(self) -> None:
         # Top-level tab widget
@@ -401,6 +386,10 @@ class OpenSteuerAuszugWindow(QMainWindow):
         self.expert_mode_checkbox.setToolTip("Show full CLI options including advanced and expert flags")
         mode_row.addWidget(self.expert_mode_checkbox)
         mode_row.addStretch(1)
+        self.theme_btn = QPushButton("☀  Light" if self._is_dark_mode else "🌙  Dark")
+        self.theme_btn.setToolTip("Toggle between light and dark theme")
+        self.theme_btn.setFixedWidth(110)
+        mode_row.addWidget(self.theme_btn)
         layout.addLayout(mode_row)
 
         layout.addWidget(self._build_input_group())
@@ -843,7 +832,13 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 self._save_recent_file(file_path)
                 event.acceptProposedAction()
 
+    def _toggle_theme(self) -> None:
+        """Flip dark/light mode and reapply the stylesheet."""
+        self._is_dark_mode = not self._is_dark_mode
+        self._apply_native_styling()
+
     def _wire_events(self) -> None:
+        self.theme_btn.clicked.connect(self._toggle_theme)
         self.data_folder_refresh_btn.clicked.connect(self._refresh_data_folder_combo)
         self.data_folder_change_btn.clicked.connect(self._browse_data_folder)
         self.data_folder_combo.currentIndexChanged.connect(self._on_data_folder_selected)
