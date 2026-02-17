@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +41,7 @@ from .gui_command_builder import (
     suggested_output_paths,
     validate_gui_run_config,
 )
+from .performance_tab import PerformanceTab
 
 
 class OpenSteuerAuszugWindow(QMainWindow):
@@ -312,17 +314,60 @@ class OpenSteuerAuszugWindow(QMainWindow):
                 border: none;
                 background: transparent;
             }
+            QTabWidget::pane {
+                border: 1px solid palette(mid);
+                border-radius: 8px;
+                background: palette(window);
+            }
+            QTabBar::tab {
+                background: palette(button);
+                color: palette(text);
+                border: 1px solid palette(mid);
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 6px 20px;
+                margin-right: 2px;
+                font-size: 13px;
+            }
+            QTabBar::tab:selected {
+                background: palette(window);
+                font-weight: 600;
+            }
+            QTabBar::tab:hover:!selected {
+                background: palette(light);
+            }
+            QTableWidget {
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                gridline-color: palette(mid);
+                background: palette(base);
+                alternate-background-color: palette(window);
+            }
+            QHeaderView::section {
+                background: palette(button);
+                color: palette(text);
+                border: none;
+                border-right: 1px solid palette(mid);
+                border-bottom: 1px solid palette(mid);
+                padding: 4px 8px;
+                font-weight: 600;
+                font-size: 12px;
+            }
         """
         self.setStyleSheet(stylesheet)
 
     def _build_ui(self) -> None:
-        # Create scroll area as central widget
-        scroll = QScrollArea(self)
+        # Top-level tab widget
+        tabs = QTabWidget(self)
+        self.setCentralWidget(tabs)
+
+        # ── Tab 1: Generator (existing UI) ──────────────────────────────
+        scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        self.setCentralWidget(scroll)
 
         # Create content widget
         root = QWidget()
@@ -364,6 +409,12 @@ class OpenSteuerAuszugWindow(QMainWindow):
         layout.addWidget(self._build_execution_group())
         layout.addWidget(self._build_log_group())
         layout.addStretch()  # Add stretch at bottom to push content up
+
+        tabs.addTab(scroll, "Generator")
+
+        # ── Tab 2: Performance ──────────────────────────────────────────
+        self._performance_tab = PerformanceTab(self)
+        tabs.addTab(self._performance_tab, "Performance")
 
         self._apply_native_styling()
 
