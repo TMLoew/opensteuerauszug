@@ -19,6 +19,13 @@ from datetime import date
 import logging
 
 
+INTERNAL_ONLY_SECURITY_PAYMENT_FIELDS = (
+    "broker_label_original",
+    "nonRecoverableTaxAmountOriginal",
+    "payment_type_original",
+)
+
+
 class MinimalTaxValueCalculator(BaseCalculator):
     """
     A minimal implementation of a tax value calculator. This computes only simple
@@ -198,6 +205,9 @@ class MinimalTaxValueCalculator(BaseCalculator):
         else:
             self._current_security_is_type_A = None
 
+        if security.payment and not security.broker_payments:
+            security.broker_payments = [payment.model_copy(deep=True) for payment in security.payment]
+
         # BaseCalculator does not have a _handle_Security method.
 
         # After the basic context is set up compute the expected payments
@@ -236,6 +246,8 @@ class MinimalTaxValueCalculator(BaseCalculator):
         elif sec_tax_value.balance and not has_balance_currency:
             # If there's a value but no currency, this is an error as we cannot process it.
             raise ValueError(f"SecurityTaxValue at {path_prefix} has a 'value' but no 'balanceCurrency'. Cannot perform currency conversion or set exchange rate accurately.")
+
+        self._set_field_value(sec_tax_value, "undefined", True, path_prefix)
 
     def _handle_SecurityPayment(self, sec_payment: SecurityPayment, path_prefix: str) -> None:
         """Handles SecurityPayment objects for currency conversion and revenue categorization."""
@@ -353,6 +365,8 @@ class MinimalTaxValueCalculator(BaseCalculator):
                     p_exp_vars = vars(p_exp)
                     all_keys = sorted(list(set(p_curr_vars.keys()) | set(p_exp_vars.keys())))
                     for key in all_keys:
+                        if key in INTERNAL_ONLY_SECURITY_PAYMENT_FIELDS:
+                            continue
                         v_curr = p_curr_vars.get(key)
                         v_exp = p_exp_vars.get(key)
                         if v_curr != v_exp:

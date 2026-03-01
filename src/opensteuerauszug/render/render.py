@@ -39,14 +39,11 @@ from opensteuerauszug.core.organisation import compute_org_nr
 from opensteuerauszug.core.security import determine_security_type, SecurityType
 
 # --- Import styles utility ---
-from opensteuerauszug.util.styles import get_custom_styles
+from opensteuerauszug.util.styles import get_custom_styles, FONT_REGULAR, FONT_BOLD
 from opensteuerauszug.util import round_accounting
 from opensteuerauszug.render.markdown_renderer import markdown_to_platypus
 
 logger = logging.getLogger(__name__)
-
-# --- Configuration ---
-DOC_INFO = "TODO: Place some compact info here"
 
 __all__ = [
     'render_tax_statement',
@@ -241,7 +238,7 @@ def create_client_info_table(tax_statement: TaxStatement, styles, box_width: flo
         name='ClientInfoStyle', 
         parent=styles['Normal'], 
         fontSize=8, 
-        fontName='Helvetica',  # Changed from Helvetica-Bold
+        fontName=FONT_REGULAR,
         leading=5,  # Reduced from 10 to save vertical space
         leftIndent=0,
         rightIndent=0
@@ -303,7 +300,7 @@ def draw_page_header(canvas, doc, is_barcode_page: bool = False):
     canvas.saveState()
     page_width = doc.pagesize[0]
     page_height = doc.pagesize[1]
-    canvas.setFont('Helvetica', 9)
+    canvas.setFont(FONT_REGULAR, 9)
     canvas.setFillColor(colors.black)
     header_x = page_width - doc.rightMargin
     
@@ -365,22 +362,93 @@ def draw_page_header_barcode(canvas, doc):
     """Draws the header and barcode on the barcode pages."""
     draw_page_header(canvas, doc, is_barcode_page=True)
 
+def format_uid_for_footer(uid):
+    """Format UID for footer display.
+
+    Example: CHE-489.219.513 MWST
+    Format: {uidOrganisationIdCategorie}-{formatted uidOrganisationId} MWST
+
+    Args:
+        uid: The Uid object from tax_statement.institution.uid
+
+    Returns:
+        Formatted string like "CHE-489.219.513 MWST" or None if uid is None
+    """
+    if uid is None:
+        return None
+
+    category = uid.uidOrganisationIdCategorie
+    org_id = uid.uidOrganisationId
+
+    # Format the 9-digit number as XXX.XXX.XXX
+    org_id_str = f"{org_id:09d}"  # Pad to 9 digits
+    formatted_id = f"{org_id_str[0:3]}.{org_id_str[3:6]}.{org_id_str[6:9]}"
+
+    return f"{category}-{formatted_id} MWST"
+
 def draw_page_footer(canvas, doc):
     """Draws the footer content and page number on each page."""
     canvas.saveState()
     page_width = doc.pagesize[0]
-    canvas.setFont('Helvetica', 8)
+    canvas.setFont(FONT_REGULAR, 8)
     footer_y = doc.bottomMargin - 10*mm # Adjust position
-    # Company Name
+
+    # Build footer text: Company name and optional UID
+    footer_parts = []
     if doc.company_name:
-        canvas.drawString(doc.leftMargin, footer_y, f"{doc.company_name} konvertiert mit OpenSteuerauszug (https://github.com/vroonhof/opensteuerauszug)")
-    # Doc Info
-    # canvas.drawCentredString(page_width / 2.0, footer_y, DOC_INFO)
+        footer_parts.append(doc.company_name)
+
+    # Add UID if present
+    if hasattr(doc, 'tax_statement') and doc.tax_statement:
+        institution = doc.tax_statement.institution
+        if institution and institution.uid:
+            uid_text = format_uid_for_footer(institution.uid)
+            if uid_text:
+                footer_parts.append(uid_text)
+
+    if footer_parts:
+        footer_text = ", ".join(footer_parts) + " konvertiert mit OpenSteuerauszug (https://github.com/vroonhof/opensteuerauszug)"
+        canvas.drawString(doc.leftMargin, footer_y, footer_text)
+
     # Page Number - Standard onPageEnd handlers typically only get current page number
-    page_num = canvas.getPageNumber()
-    text = f"Seite {page_num}"
-    canvas.drawRightString(page_width - doc.rightMargin, footer_y, text)
+    if not getattr(canvas, "defer_page_number", False):
+        page_num = canvas.getPageNumber()
+        text = f"Seite {page_num}"
+        canvas.drawRightString(page_width - doc.rightMargin, footer_y, text)
     canvas.restoreState()
+
+
+class NumberedCanvas(canvas.Canvas):
+    """Canvas that knows the total page count to render."""
+
+    def __init__(self, *args, **kwargs):
+        self._saved_page_states = []
+        self.left_margin = kwargs.pop("left_margin", 0)
+        self.right_margin = kwargs.pop("right_margin", 0)
+        self.bottom_margin = kwargs.pop("bottom_margin", 0)
+        self.defer_page_number = True
+        super().__init__(*args, **kwargs)
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self._draw_page_number(num_pages)
+            canvas.Canvas.showPage(self)
+        canvas.Canvas.save(self)
+
+    def _draw_page_number(self, page_count: int) -> None:
+        page_num = self.getPageNumber()
+        text = f"Seite {page_num} von {page_count}"
+        self.setFont(FONT_REGULAR, 8)
+        footer_y = self.bottom_margin - 10 * mm
+        page_width = self._pagesize[0]
+        self.drawRightString(page_width - self.right_margin, footer_y, text)
+
 
 # --- Table Creation Functions ---
 
@@ -496,6 +564,67 @@ Wertschriftenverzeichnis einzusetzen.''', val_left)], # Col 5 << SHIFTED
          ],
     ]
 
+    # Add liabilities row if liabilities total is not 0
+    liabilities_total = summary_data.get('liabilities_total', None)
+    liabilities_payments_total = summary_data.get('liabilities_payments_total', None)
+    show_liabilities = liabilities_total and liabilities_total != 0
+    show_liability_payments = liabilities_payments_total and liabilities_payments_total != 0
+
+    if show_liabilities or show_liability_payments:
+        # Row 8: Liabilities Header(s)
+        # Add "Schulden" header only if there are liabilities
+        if show_liabilities:
+            header_row = [
+                Paragraph(f'<b>Schulden</b><br/>am {summary_data.get("period_end_date", "31.12")}', header_style),  # Col 0
+                '',  # Col 1: blank
+                '',  # Col 2: blank
+            ]
+        else:
+            # Leave space empty if no liabilities
+            header_row = ['', '', '']
+
+        # Add empty space (one column) between "Schulden" and "Schuldzinsen"
+        # Columns 3-5 are blank
+        header_row.extend(['', '', ''])  # Cols 3-5: one empty space
+
+        # Add "Schuldzinsen" header if there are liability payments
+        if show_liability_payments:
+            header_row.append(Paragraph(f'<b>Schuldzinsen</b> {summary_data.get("tax_period", "")}', header_style))  # Col 6
+        else:
+            header_row.append('')
+
+        # Fill remaining columns (Cols 7-10, then Col 11 with description)
+        header_row.extend(['', '', '', '',
+                          Paragraph('''Werte für zusätzliches Steuererklärungsformular <b>"Schuldenverzeichnis"</b>''', val_left)])
+
+        table_data.append(header_row)
+
+        # Row 9: Liabilities Values
+        # Add "Schulden" value only if there are liabilities
+        if show_liabilities:
+            values_row = [
+                Paragraph(format_currency_rounded(liabilities_total), val_right),  # Col 0
+                '',  # Col 1: blank
+                '',  # Col 2: blank
+            ]
+        else:
+            # Leave space empty if no liabilities
+            values_row = ['', '', '']
+
+        # Add empty space between boxes (Cols 3-5)
+        values_row.extend(['', '', ''])
+
+        # Add liability payments value (Col 6)
+        if show_liability_payments:
+            values_row.append(Paragraph(format_currency_rounded(liabilities_payments_total), val_right))
+        else:
+            values_row.append('')
+
+        # Fill remaining columns (Cols 7-11, total 5 columns)
+        values_row.extend(['', '', '', '', ''])
+
+        table_data.append(values_row)
+
     usable_width = usable_width - 4*10
     base_col_width = usable_width / 7
     col_widths = [base_col_width, # Col 0: Steuerwert
@@ -513,14 +642,19 @@ Wertschriftenverzeichnis einzusetzen.''', val_left)], # Col 5 << SHIFTED
                   ]
 
     row_heights = [15*mm, 6*mm, 2*mm, 15*mm, 6*mm, 2*mm, 20*mm, 6*mm]
+    if show_liabilities or show_liability_payments:
+        row_heights.extend([15*mm, 6*mm])
+
     summary_table = Table(table_data, colWidths=col_widths, rowHeights=row_heights)
 
     # --- Table Style ---
 
     # --- Define common styles ---
     common_padding = [
-        ('LEFTPADDING', (0, 0), (-1, -1), 6), ('RIGHTPADDING', (0, 0), (-1, -1), 1),
-        ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 1),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
         # footnote colunn
         ('LEFTPADDING', (1, 0), (1, -1), 1),
         ('LEFTPADDING', (7, 0), (7, -1), 1),
@@ -570,6 +704,18 @@ Wertschriftenverzeichnis einzusetzen.''', val_left)], # Col 5 << SHIFTED
         ('LINEBELOW', (8, 7), (8, 7), *line_style),
     ]
 
+    if show_liabilities:
+        line_commands.extend([
+            ('LINEABOVE', (0, 9), (0, 9), *line_style),
+            ('LINEBELOW', (0, 9), (0, 9), *line_style),
+        ])
+
+    if show_liability_payments:
+        line_commands.extend([
+            ('LINEABOVE', (5, 9), (6, 9), *line_style),
+            ('LINEBELOW', (5, 9), (6, 9), *line_style),
+        ])
+
     # --- Combine all styles ---
     style_commands = [
         common_valign,
@@ -588,63 +734,164 @@ Wertschriftenverzeichnis einzusetzen.''', val_left)], # Col 5 << SHIFTED
     return KeepTogether([summary_table, Spacer(1, 2*mm)])
 
 # --- Liabilities Table Function ---
-def create_liabilities_table(data, styles, usable_width):
-    """Creates a table displaying liabilities information.
-    
+def create_liabilities_table(tax_statement, styles, usable_width):
+    """Creates a table displaying liabilities accounts information as per user specification.
+
     Args:
-        data: Dictionary containing the liabilities data
+        tax_statement: The TaxStatement model containing liabilities data
         styles: Dictionary of styles for text formatting
         usable_width: Available width for the table
         
     Returns:
         A Table object containing the liabilities data or None if no data
     """
-    if not data.get('liabilities'): return None
-    header_style = styles['Header_CENTER']
+    if not tax_statement.listOfLiabilities or not tax_statement.listOfLiabilities.liabilityAccount:
+        return None
+
+    liabilities = tax_statement.listOfLiabilities.liabilityAccount
+    period_end_date = tax_statement.periodTo.strftime("%d.%m.%Y") if tax_statement.periodTo else "31.12"
+    year = str(tax_statement.taxPeriod) if tax_statement.taxPeriod else ""
+
+    header_style = styles['Header_RIGHT']
+    header_left = styles['Header_LEFT']
     val_left = styles['Val_LEFT']
     val_right = styles['Val_RIGHT']
     val_center = styles['Val_CENTER']
     bold_left = styles['Bold_LEFT']
     bold_right = styles['Bold_RIGHT']
-    period_end_date = data.get('summary', {}).get('period_end_date', '31.12')
-    tax_period = data.get('summary', {}).get('tax_period', '')
-    table_data = [ [Paragraph('Datum', header_style), Paragraph('Bezeichnung<br/>Schulden<br/>Zinsen', header_style), Paragraph('Währung', header_style), Paragraph('Schulden', header_style), Paragraph('Kurs', header_style), Paragraph(f'Schulden<br/>{period_end_date}<br/>in CHF', header_style), Paragraph(f'Schuldzinsen<br/>{tax_period}<br/>in CHF', header_style)] ]
-    total_debt = Decimal(0); total_interest = Decimal(0)
-    for item in data['liabilities']:
-        if 'transactions' in item:
-            for trans in item['transactions']:
-                table_data.append([
-                    Paragraph(trans.get('date', ''), val_left),
-                    Paragraph(trans.get('description', ''), val_left),
-                    Paragraph(item.get('currency', 'CHF'), val_center),
-                    Paragraph(format_currency_2dp(trans.get('amount')), val_right),
-                    Paragraph('', val_right),
-                    Paragraph('', val_right),
-                    Paragraph(format_currency_2dp(trans.get('amount')), val_right)
-                ])
+
+    table_data = [
+        [
+            Paragraph('Datum', header_left),
+            Paragraph('Bezeichnung<br/>Schulden<br/>Zinsen', header_left),
+            Paragraph('Währung', header_style),
+            Paragraph('Schulden<br/>Schuldzinsen', header_style),
+            Paragraph('Kurs', header_style),
+            Paragraph(f'<b>Schulden</b><br/>{period_end_date}<br/>in CHF', header_style),
+            '',
+            '',
+            Paragraph(f'<b>Schuldzinsen</b><br/>{year}<br/>in CHF', header_style),
+        ]
+    ]
+
+    intermediate_total_rows = []
+    current_row = 1  # Start after header
+
+    liabilities.sort(key=lambda a: a.bankAccountName or a.iban or a.bankAccountNumber or '')
+
+    for account in liabilities:
+        # Build the account description with optional opening/closing date lines
+        account_desc = f"<strong>{escape_html_for_paragraph(account.bankAccountName)}</strong>"
+        if (account.iban and account.iban != account.bankAccountName) or account.bankAccountNumber:
+            account_desc += f"<br/>{escape_html_for_paragraph((account.iban if account.iban != account.bankAccountName else account.bankAccountNumber) or '')}"
+        if account.openingDate:
+            account_desc += f"<br/>Eröffnung {account.openingDate.strftime('%d.%m.%Y')}"
+        if account.closingDate:
+            account_desc += f"<br/>Saldierung {account.closingDate.strftime('%d.%m.%Y')}"
+
+        # Add account header row
         table_data.append([
-            Paragraph(item.get('date', period_end_date), val_left),
-            Paragraph(item.get('description', '').replace('\n', '<br/>'), val_left),
-            Paragraph(item.get('currency', 'CHF'), val_center),
-            Paragraph(format_currency_2dp(item.get('amount')), val_right),
-            Paragraph(item.get('rate', ''), val_right),
-            Paragraph(format_currency_2dp(item.get('value_chf')), val_right),
-            Paragraph(format_currency_2dp(item.get('total_interest')), val_right)
+            '',
+            Paragraph(account_desc, val_left),
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
         ])
-        total_debt += Decimal(str(item.get('value_chf', 0))); total_interest += Decimal(str(item.get('total_interest', 0)))
+        current_row += 1
+
+        account.payment.sort(key=lambda p: p.paymentDate or '')
+        for payment in account.payment:
+            table_data.append([
+                Paragraph(payment.paymentDate.strftime("%d.%m.%Y") if payment.paymentDate else '', val_left),
+                Paragraph(escape_html_for_paragraph(payment.name or ''), val_left),
+                Paragraph(payment.amountCurrency or account.bankAccountCurrency or '', val_center),
+                Paragraph(format_currency_2dp(payment.amount), val_right),
+                Paragraph(format_exchange_rate(payment.exchangeRate), val_right),
+                '',
+                '',
+                '',
+                Paragraph(format_currency(payment.grossRevenueB), val_right),
+            ])
+            current_row += 1
+
+        if account.closingDate:
+            date_str = account.closingDate.strftime("%d.%m.%Y")
+        elif account.taxValue and account.taxValue.referenceDate:
+            date_str = account.taxValue.referenceDate.strftime("%d.%m.%Y")
+        else:
+            date_str = ""
+
+        if account.taxValue:
+            balance_str = format_currency_2dp(account.taxValue.balance)
+            exchange_rate_str = format_exchange_rate(account.taxValue.exchangeRate)
+            currency_str = account.taxValue.balanceCurrency or account.bankAccountCurrency or ''
+        else:
+            balance_str = ''
+            exchange_rate_str = ''
+            currency_str = ''
+
+        table_data.append([
+            Paragraph(date_str, bold_left),
+            Paragraph('Schulden' if account.closingDate else 'Steuerwert / Schuldzinsen', bold_left),
+            Paragraph(currency_str, val_center),
+            Paragraph(balance_str, val_right),
+            Paragraph(exchange_rate_str, val_right),
+            Paragraph(format_currency_2dp(account.totalTaxValue), bold_right),
+            '',
+            '',
+            Paragraph(format_currency_2dp(account.totalGrossRevenueB), bold_right),
+        ])
+        intermediate_total_rows.append(current_row)
+        current_row += 1
+
+        # Separator row after each account
+        table_data.append([])
+        current_row += 1
+
+    # Add a final row with totals for the list of liabilities
     table_data.append([
-        Paragraph('', val_left),
-        Paragraph('Total Schulden', bold_left),
-        Paragraph('', val_left),
-        Paragraph('', val_right),
-        Paragraph('', val_right),
-        Paragraph(format_currency_2dp(total_debt), bold_right),
-        Paragraph(format_currency_2dp(total_interest), bold_right)
+        "",
+        Paragraph("Total Schulden", bold_left),
+        '',
+        '',
+        '',
+        Paragraph(format_currency_2dp(tax_statement.listOfLiabilities.totalTaxValue), bold_right),
+        '',
+        '',
+        Paragraph(format_currency_2dp(tax_statement.listOfLiabilities.totalGrossRevenueB), bold_right),
     ])
-    col_widths = [30*mm, 100*mm, 20*mm, 27*mm, 20*mm, 30*mm, 30*mm]
-    assert sum(col_widths) < usable_width
+
+    col_widths = [24*mm, 110*mm, 19*mm, 28*mm, 18*mm, 28*mm, 5*mm, 8, 23*mm]
     liabilities_table = Table(table_data, colWidths=col_widths)
-    liabilities_table.setStyle(TableStyle([ ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LEFTPADDING', (0, 0), (-1, -1), 1), ('RIGHTPADDING', (0, 0), (-1, -1), 1), ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1), ('LINEBELOW', (0, 0), (-1, 0), 1, colors.black), ('BOTTOMPADDING', (0, 0), (-1, 0), 3*mm), ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black), ('TOPPADDING', (0, -1), (-1, -1), 3*mm), ]))
+
+    table_style = [
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 1),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 1),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        # Header row
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 1),
+        ('TOPPADDING', (0, 0), (-1, 0), 1),
+        # First content row
+        ('TOPPADDING', (0, 1), (-1, 1), 5),
+        # Footer/total row
+        ('TOPPADDING', (0, -1), (-1, -1), 1),
+        ('BOTTOMPADDING', (0, -1), (-1, -1), 1),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d3d3d3')),
+        # Final totals
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#d3d3d3')),
+    ]
+
+    # Add even lighter grey background to each intermediate total row (after each account)
+    for idx in intermediate_total_rows:
+        table_style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#f0f0f0')))
+
+    liabilities_table.setStyle(TableStyle(table_style))
     return liabilities_table
 
 # --- Costs Table Function ---
@@ -674,7 +921,21 @@ def create_costs_table(data, styles, usable_width):
     col_widths = [110*mm, 97*mm, 50*mm]
     assert sum(col_widths) < usable_width
     costs_table = Table(table_data, colWidths=col_widths)
-    costs_table.setStyle(TableStyle([ ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('LEFTPADDING', (0, 0), (-1, -1), 1), ('RIGHTPADDING', (0, 0), (-1, -1), 1), ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1), ('LINEBELOW', (0, 0), (-1, 0), 1, colors.black), ('BOTTOMPADDING', (0, 0), (-1, 0), 3*mm), ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black), ('TOPPADDING', (0, -1), (-1, -1), 3*mm), ]))
+    costs_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 1),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 1),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        # Header row
+        ('LINEBELOW', (0, 0), (-1, 0), 1, colors.black),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 1),
+        ('TOPPADDING', (0, 0), (-1, 0), 1),
+        # Footer/total row
+        ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black),
+        ('TOPPADDING', (0, -1), (-1, -1), 1),
+        ('BOTTOMPADDING', (0, -1), (-1, -1), 1),
+    ]))
     footnote_text = '(2) Über die Abzugsfähigkeit der Spesen entscheidet die zuständige Veranlagungsbehörde.'
     return KeepTogether([costs_table, Spacer(1, 2*mm), Paragraph(footnote_text, val_left)])
 
@@ -740,7 +1001,7 @@ _WARNING_BORDER = colors.HexColor('#FFCC00')  # darker amber for the border
 _WARNING_TEXT_COLOR = colors.HexColor('#664D03')  # dark amber for text
 
 
-def create_critical_warnings_flowables(warnings: list, styles) -> list:
+def create_critical_warnings_flowables(warnings: list, styles, usable_width) -> list:
     """Build a list of ReportLab flowables that render critical warnings.
 
     Each warning is shown as a bullet item inside a highlighted box so it
@@ -749,6 +1010,7 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
     Args:
         warnings: List of ``CriticalWarning`` instances.
         styles: The custom style dictionary.
+        usable_width: The usable width for the content area (used to constrain table width).
 
     Returns:
         A list of flowables (possibly empty).
@@ -760,7 +1022,7 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
         name='CriticalWarningTitle',
         parent=styles['Normal'],
         fontSize=10,
-        fontName='Helvetica-Bold',
+        fontName=FONT_BOLD,
         textColor=_WARNING_TEXT_COLOR,
         leading=14,
         spaceAfter=2 * mm,
@@ -769,7 +1031,7 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
         name='CriticalWarningItem',
         parent=styles['Normal'],
         fontSize=8,
-        fontName='Helvetica',
+        fontName=FONT_REGULAR,
         textColor=_WARNING_TEXT_COLOR,
         leading=11,
         leftIndent=6 * mm,
@@ -777,18 +1039,20 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
         spaceBefore=1 * mm,
     )
 
-    inner = [
-        Paragraph(
+    # Subtract padding (4mm left + 4mm right = 8mm total)
+    effective_width = usable_width - 8*mm
+
+    # Build table rows: title row + one row per warning
+    rows = [
+        [Paragraph(
             "CRITICAL WARNINGS / KRITISCHE WARNUNGEN",
             warning_title_style,
-        )
+        )]
     ]
 
     for w in warnings:
-        # Check if message contains formatting markers (___ITALIC_START___ and ___ITALIC_END___)
         msg = w.message
         if '___ITALIC_START___' in msg and '___ITALIC_END___' in msg:
-            # Split by markers and format accordingly
             parts = msg.split('___ITALIC_START___')
             formatted_msg = escape_html_for_paragraph(parts[0])
             if len(parts) > 1:
@@ -799,30 +1063,26 @@ def create_critical_warnings_flowables(warnings: list, styles) -> list:
         else:
             formatted_msg = escape_html_for_paragraph(msg)
 
-        inner.append(
+        rows.append([
             Paragraph(
                 f"&bull; {formatted_msg}",
                 warning_item_style,
             )
-        )
+        ])
 
-    # Wrap in a table to get the coloured background and border
-    # Split warnings across multiple rows to allow page breaks
-    table_data = [[inner[0]]]  # Title in first row
-    for warning_para in inner[1:]:
-        table_data.append([warning_para])
-
-    table = Table(table_data, colWidths=[None])
-    table.setStyle(TableStyle([
+    table = Table(rows, colWidths=[effective_width])
+    table_style = TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), _WARNING_BG),
         ('BOX', (0, 0), (-1, -1), 1, _WARNING_BORDER),
         ('LEFTPADDING', (0, 0), (-1, -1), 4 * mm),
         ('RIGHTPADDING', (0, 0), (-1, -1), 4 * mm),
-        ('TOPPADDING', (0, 0), (-1, -1), 3 * mm),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3 * mm),
+        ('TOPPADDING', (0, 0), (-1, 0), 3 * mm),  # Extra top padding for title row
+        ('TOPPADDING', (0, 1), (-1, -1), 1 * mm),  # Less padding for warning rows
+        ('BOTTOMPADDING', (0, -1), (-1, -1), 3 * mm),  # Extra bottom padding for last row
+        ('BOTTOMPADDING', (0, 0), (-1, -2), 1 * mm),  # Less padding for other rows
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-    ]))
-    # Enable the table to split across pages
+    ])
+    table.setStyle(table_style)
     table.hAlign = 'LEFT'
     table.repeatRows = 1  # Repeat the title row on each page
 
@@ -846,7 +1106,7 @@ def create_critical_warnings_hint(warnings: list, styles) -> list:
         name='CriticalWarningHint',
         parent=styles['Normal'],
         fontSize=9,
-        fontName='Helvetica-Bold',
+        fontName=FONT_BOLD,
         textColor=_WARNING_TEXT_COLOR,
         leading=12,
     )
@@ -983,36 +1243,32 @@ def render_to_barcodes(tax_statement: TaxStatement) -> list[PILImage.Image]:
     # right
     # Overhead:
     #    1  start word
-    #    1 + 2 + 4 macro pdf fields with 4 word file ID
+    #    1 + 2 + 1 macro pdf fields with 1 word file ID
     #    4 for segment count
     #    1 for possible last code marker
     #    32 error correction at level 4
     #    1 for specifying byte encoding
-    # gives 46 words of overhead
-    FIXED_OVERHEAD = 46
+    # gives 43 words of overhead
+    FIXED_OVERHEAD = 43
     # Given in the guidance
     NUM_COLUMNS = 13
     NUM_ROWS = 35
     # reserve enough space for file name (it is actually less because of compression, but be safe)
-    file_name_lenght = len(file_name)
-    capactity = NUM_COLUMNS * NUM_ROWS - FIXED_OVERHEAD - file_name_lenght
-    # Byte encodinge efficency is 6 bytes per 5 codewords
-    segment_size = floor((capactity / 5) * 6)
-    # Official PDF generator uses 4 * 3 digit (<= 255 each) for file ID
-    # Create file ID based on hash of taxstatement id and creation date
-    hash_input = f"{file_name}_{tax_statement.creationDate.timestamp() if tax_statement.creationDate else ''}"
-    digest = hashlib.sha256(hash_input.encode('utf-8')).digest()
-    file_id = [100 + (b % 156) for b in digest[:4]]
+    # file_name_length = len(file_name)
+    # Issue #239: for now don't include filenames
+    file_name_length = 0
+    capacity = NUM_COLUMNS * NUM_ROWS - FIXED_OVERHEAD - file_name_length
+    # Byte encoding efficiency is 6 bytes per 5 codewords
+    SEGMENT_SIZE = floor((capacity / 5) * 6)
 
     # Use encode_macro for proper macro PDF417 generation
     codes = encode_macro(
         data,
-        file_id=file_id,
-        file_name=file_name,
+        file_id=[1],
         columns=NUM_COLUMNS,
         force_rows=NUM_ROWS,
         security_level=4,
-        segment_size=segment_size,
+        segment_size=SEGMENT_SIZE,
         force_binary=True,
     )
     
@@ -1160,7 +1416,7 @@ def create_bank_accounts_table(tax_statement, styles, usable_width):
 
     intermediate_total_rows = []
     current_row = 1  # Start after header
-    bank_accounts.sort(key=lambda a: a.iban or a.bankAccountName or a.bankAccountNumber or '')
+    bank_accounts.sort(key=lambda a: a.bankAccountName or a.iban or a.bankAccountNumber or '')
     for account in bank_accounts:
         # Build the account description with optional opening/closing date lines
         account_desc = f"<strong>{escape_html_for_paragraph(account.bankAccountName)}</strong>"
@@ -1248,14 +1504,16 @@ def create_bank_accounts_table(tax_statement, styles, usable_width):
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 1),
         ('RIGHTPADDING', (0, 0), (-1, -1), 1),
-        ('TOPPADDING', (0, 0), (-1, -1), 1),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        # Header row
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 1),
+        ('TOPPADDING', (0, 0), (-1, 0), 1),
         # First content row
-        ('TOPPADDING', (0, 1), (-1, 1), 3*mm),
-        # Last content row
-        # For now handled by the extra seperator row
-        # ('BOTTOMPADDING', (0, -2), (-1, -2), 3*mm),
-        # Header row background (light grey)
+        ('TOPPADDING', (0, 1), (-1, 1), 5),
+        # Footer/total row
+        ('TOPPADDING', (0, -1), (-1, -1), 1),
+        ('BOTTOMPADDING', (0, -1), (-1, -1), 1),
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d3d3d3')),
         # Final totals
         ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#d3d3d3')),
@@ -1348,6 +1606,7 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
     table_data = []
     intermediate_total_rows = []
     depot_header_rows = []
+    country_header_rows = []  # Track country header rows for DA1 securities
     current_row = 1  # Start after header
 
     
@@ -1361,14 +1620,37 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
         table_data.append(depot_header_row)
         depot_header_rows.append(current_row)
         current_row += 1
+        # Separator row - use non-breaking space for height
+        table_data.append([Paragraph('&nbsp;')]*len(table_header))
+        current_row += 1
 
-        securities_in_depot.sort(
-            key=lambda s: (
-                int(s.valorNumber) if s.valorNumber is not None else 0,
-                s.securityName if s.securityName is not None else ''
-            )
-        )
+        # Sort by country first if security type is DA1, then by valor number and name
+        def securities_in_depot_sort_key(s):
+            country = (s.country if s.country is not None else '',) if security_type == "DA1" else ()
+            valor = int(s.valorNumber) if s.valorNumber is not None else 0
+            name = s.securityName if s.securityName is not None else ''
+            return country + (valor, name)
+
+        securities_in_depot.sort(key=securities_in_depot_sort_key)
+        previous_country = None
         for security in securities_in_depot:
+            # For DA1, add country header row when country changes
+            if security_type == "DA1":
+                current_country = security.country if security.country is not None else ''
+                if current_country != previous_country:
+                    # Add country header row
+                    country_header_row = [
+                        Paragraph('', val_left),
+                        Paragraph(current_country or '', bold_left),
+                    ] + [Paragraph('', val_left)] * (len(table_header) - 2)
+                    table_data.append(country_header_row)
+                    country_header_rows.append(current_row)
+                    current_row += 1
+                    previous_country = current_country
+                    # Separator row - use non-breaking space for height
+                    table_data.append([Paragraph('&nbsp;')]*len(table_header))
+                    current_row += 1
+
             # Description/header row for the security
             if security.country != "CH" and security.country != None:
                 cur_country = f"{security.currency or ''}<br/>{security.country}"
@@ -1431,9 +1713,6 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
                 elif entry_type == 'stock':
                     if entry.quotationType != 'PIECE':
                         raise NotImplementedError("Cannot render stock type")
-                    # Skip rendering initial holdings (Bestand) when quantity is zero
-                    if not entry.mutation and entry.quantity == 0:
-                        continue
                     if entry.mutation:
                         name = entry.name
                     else:
@@ -1444,7 +1723,7 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
                         Paragraph(format_stock_quantity(entry.quantity, entry.mutation, stock_quantity_template), val_right),
                         Paragraph(entry.balanceCurrency if entry.unitPrice else '', val_right),
                         # TODO: What should the resolution of unit price be? UK stocks can have fractions of a penny
-                        Paragraph(format_currency(entry.unitPrice) if getattr(entry, 'unitPrice', None) else '', val_right),
+                        Paragraph(format_currency(entry.unitPrice), val_right),
                         Paragraph('', val_left),
                         Paragraph(format_exchange_rate(entry.exchangeRate) if getattr(entry, 'exchangeRate', None) else '', val_right),
                         Paragraph('', val_right),
@@ -1464,8 +1743,11 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
             else:
                 date_str = ""
 
-            # Add star marker for manual prices
-            unit_price_str = format_currency(tax_value.unitPrice) if tax_value and getattr(tax_value, 'unitPrice', None) else ''
+            unit_price_str = ''
+            if tax_value and getattr(tax_value, 'unitPrice', None):
+                unit_price_str = format_currency(tax_value.unitPrice)
+            elif tax_value and getattr(tax_value, 'undefined', None):
+                unit_price_str = "n.v."
             tax_value_str = format_currency_2dp(tax_value.value) if tax_value and getattr(tax_value, 'value', None) else ''
             if tax_value and hasattr(tax_value, 'kursliste') and tax_value.kursliste is False:
                 # Mark manual prices with a star
@@ -1492,22 +1774,21 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
             ])
             intermediate_total_rows.append(current_row)
             current_row += 1
-            # Separator row
-            table_data.append([Paragraph('')]*len(table_header))
+            # Separator row - use non-breaking space for height
+            table_data.append([Paragraph('&nbsp;')]*len(table_header))
             current_row += 1
 
-    # TODO read pre-summed totals from the model
     if security_type == "A":
         total_tax_value = tax_statement.svTaxValueA
         total_gross_revenueA = tax_statement.svGrossRevenueA
-        total_gross_revenueB = None
+        total_gross_revenueB = Decimal('0')
     elif security_type == "B":
         total_tax_value = tax_statement.svTaxValueB
-        total_gross_revenueA = None
+        total_gross_revenueA = Decimal('0')
         total_gross_revenueB = tax_statement.svGrossRevenueB
     elif security_type == "DA1":
         total_tax_value = tax_statement.da1TaxValue
-        total_gross_revenueA = None
+        total_gross_revenueA = Decimal('0')
         total_gross_revenueB = tax_statement.da_GrossRevenue
     # Add a total row
     table_data.append([
@@ -1534,11 +1815,15 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 1),
         ('RIGHTPADDING', (0, 0), (-1, -1), 1),
-        ('TOPPADDING', (0, 0), (-1, -1), 1),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
-        ('TOPPADDING', (0, -2), (-1, -2), 3*mm),
-        # Header row background (light grey)
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        # Footer/total row (row before final separator)
+        ('TOPPADDING', (0, -2), (-1, -2), 1),
+        ('BOTTOMPADDING', (0, -2), (-1, -2), 1),
+        # Header row
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d3d3d3')),
+        ('TOPPADDING', (0, 0), (-1, 0), 1),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 1),
     ]
     # Set padding to 0 for hidden columns to avoid negative availWidth
     for col in hidden_columns:
@@ -1546,6 +1831,9 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
         table_style.append(('RIGHTPADDING', (col, 0), (col, -1), 0))
         table_style.append(('TOPPADDING', (col, 0), (col, -1), 0))
         table_style.append(('BOTTOMPADDING', (col, 0), (col, -1), 0))
+    # Country header rows for DA1
+    for idx in country_header_rows:
+        table_style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#f3f3f3')))
     for idx in intermediate_total_rows:
         table_style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#f0f0f0')))
     # Final totals
@@ -1556,6 +1844,99 @@ def create_securities_table(tax_statement, styles, usable_width, security_type: 
     return securities_table
 
 # --- Main API function to be called from steuerauszug.py ---
+def create_payment_reconciliation_tables(tax_statement: TaxStatement, styles, usable_width):
+    report = tax_statement.payment_reconciliation_report
+    if report is None or not report.rows:
+        return []
+
+    val_left = styles['Val_LEFT']
+    val_right = styles['Val_RIGHT']
+    header_style = styles['Header_RIGHT']
+    status_ok = colors.HexColor('#1f7a1f')
+    status_err = colors.HexColor('#b22222')
+    status_exp = colors.HexColor('#8a6d3b')
+
+    grouped = {}
+    for row in report.rows:
+        grouped.setdefault(row.country or '??', []).append(row)
+
+    flowables = []
+    for country in sorted(grouped.keys()):
+        rows = sorted(grouped[country], key=lambda r: (r.security, r.payment_date))
+        flowables.append(Paragraph(f"Abgleich Zahlungen ({country})", styles['h2']))
+
+        table_header = [
+            Paragraph('Wertschrift', styles['Header_LEFT']),
+            Paragraph('Datum', styles['Header_LEFT']),
+            Paragraph('KL Div CHF', header_style),
+            Paragraph('KL Quellenst. CHF', header_style),
+            Paragraph('Broker Div', header_style),
+            Paragraph('Broker Quellenst.', header_style),
+            Paragraph('OK', header_style),
+        ]
+        data = []
+        mismatch_rows = []
+        expected_rows = []
+
+        for idx, row in enumerate(rows, start=1):
+            broker_div = ''
+            if row.broker_dividend_amount is not None:
+                broker_div = f"{format_currency(row.broker_dividend_amount)} {row.broker_dividend_currency or ''}".strip()
+            broker_wht_paragraph = Paragraph('', val_right)
+            if row.broker_withholding_amount is not None:
+                broker_wht = f"{format_currency(row.broker_withholding_amount)} {row.broker_withholding_currency or ''}".strip()
+                broker_wht_markup = escape_html_for_paragraph(broker_wht)
+                if row.broker_withholding_entry_text:
+                    broker_wht_text = escape_html_for_paragraph(row.broker_withholding_entry_text).replace("\n", "<br/>")
+                    broker_wht_markup = f"{broker_wht_markup}<br/><font size=7>{broker_wht_text}</font>"
+                broker_wht_paragraph = Paragraph(broker_wht_markup, val_right)
+
+            status_mark = '✓' if row.status in ('match', 'expected') else '✗'
+            data.append([
+                Paragraph(escape_html_for_paragraph(row.security), val_left),
+                Paragraph(row.payment_date.strftime("%d.%m.%Y"), val_left),
+                Paragraph(format_currency(row.kursliste_dividend_chf), val_right),
+                Paragraph(format_currency(row.kursliste_withholding_chf), val_right),
+                Paragraph(escape_html_for_paragraph(broker_div), val_right),
+                broker_wht_paragraph,
+                Paragraph(status_mark, val_right),
+            ])
+
+            if row.status == 'mismatch':
+                mismatch_rows.append(idx)
+            elif row.status == 'expected':
+                expected_rows.append(idx)
+
+        col_widths = [usable_width * 0.22, usable_width * 0.12, usable_width * 0.12, usable_width * 0.14, usable_width * 0.14, usable_width * 0.14, usable_width * 0.12]
+        table = Table([table_header] + data, colWidths=col_widths, repeatRows=1)
+        style = [
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d3d3d3')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 1),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 1),
+            ('TOPPADDING', (0, 0), (-1, -1), 1),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
+            # Header row
+            ('TOPPADDING', (0, 0), (-1, 0), 1),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 1),
+        ]
+        for idx in mismatch_rows:
+            style.append(('TEXTCOLOR', (-1, idx), (-1, idx), status_err))
+            style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#fdecea')))
+        for idx in expected_rows:
+            style.append(('TEXTCOLOR', (-1, idx), (-1, idx), status_exp))
+            style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#fff6dd')))
+        for i, row in enumerate(rows, start=1):
+            if row.status == 'match':
+                style.append(('TEXTCOLOR', (-1, i), (-1, i), status_ok))
+
+        table.setStyle(TableStyle(style))
+        flowables.append(table)
+        flowables.append(Spacer(1, 0.4 * cm))
+
+    return flowables
+
+
 def render_tax_statement(
     tax_statement: TaxStatement,
     output_path: Union[str, Path],
@@ -1611,8 +1992,15 @@ def render_tax_statement(
     # Set up barcode generator
     doc.onedee_generator = OneDeeBarCode()
     
-    # Compute the organization number
-    doc.org_nr = compute_org_nr(tax_statement, override_org_nr)
+    # Extract the organization number from the tax statement ID
+    # The ID format is: CC(2 chars)NNNNN(5 digits org_nr)CCCCCCCCCCCCCC(14 chars)YYYYMMDD(8)SS(2)
+    # So org_nr is at positions 2-6 (0-indexed: [2:7])
+    if tax_statement.id and len(tax_statement.id) >= 7:
+        doc.org_nr = tax_statement.id[2:7]
+    else:
+        # Fallback to computing if ID is not set or too short (shouldn't happen after cleanup phase)
+        logger.warning("tax_statement.id is not set or too short, computing org_nr as fallback")
+        doc.org_nr = compute_org_nr(tax_statement, override_org_nr)
 
     # Set company name (used in footer and header) - use override if provided
     company_name = institution_name_override if institution_name_override else (tax_statement.institution.name if tax_statement.institution else "")
@@ -1623,7 +2011,7 @@ def render_tax_statement(
 
     # Set the PDF title using institution name and tax year
     tax_year = str(tax_statement.taxPeriod) if tax_statement.taxPeriod else ""
-    title_parts = ["Steuerauszug", company_name, tax_year]
+    title_parts = ["Steuerauszug", doc.company_name, tax_year]
     doc.title = " ".join(part for part in title_parts if part)
     
     # Extract and store client information for header display (backward compatibility)
@@ -1674,25 +2062,28 @@ def render_tax_statement(
             total_gross_revenue_b = tax_statement.totalGrossRevenueB or Decimal('0')
             tax_statement.total_brutto_gesamt = total_gross_revenue_a + total_gross_revenue_b
 
-        # Ensure the model fields are populated
-        if tax_statement.svGrossRevenueA is None:
-            tax_statement.svGrossRevenueA = tax_statement.totalGrossRevenueA or Decimal('0')
+        # Ensure the model fields are populated (TotalCalculator should have done this)
+        summary_steuerwert_a = tax_statement.summaryTaxValueA or Decimal('0')
+        summary_steuerwert_b = tax_statement.summaryTaxValueB or Decimal('0')
+        summary_brutto_a = tax_statement.summaryGrossRevenueA or Decimal('0')
+        summary_brutto_b = tax_statement.summaryGrossRevenueB or Decimal('0')
+        summary_steuerwert_ab = tax_statement.steuerwert_ab or (summary_steuerwert_a + summary_steuerwert_b)
 
-        if tax_statement.svGrossRevenueB is None:
-            tax_statement.svGrossRevenueB = tax_statement.totalGrossRevenueB or Decimal('0')
-
-        if tax_statement.svTaxValueA is None:
-            tax_statement.svTaxValueA = Decimal('0')
-        if tax_statement.svTaxValueB is None:
-            tax_statement.svTaxValueB = Decimal('0')
+        liabilities_total = Decimal('0')
+        liabilities_payments_total = Decimal('0')
+        if tax_statement.listOfLiabilities and tax_statement.listOfLiabilities.totalTaxValue:
+            liabilities_total = tax_statement.listOfLiabilities.totalTaxValue
+        if tax_statement.listOfLiabilities and tax_statement.listOfLiabilities.totalGrossRevenueB:
+            liabilities_payments_total = tax_statement.listOfLiabilities.totalGrossRevenueB
 
         # Create summary data dictionary from model fields
+
         summary_data = {
-            "steuerwert_ab": tax_statement.svTaxValueA + tax_statement.svTaxValueB,
-            "steuerwert_a": tax_statement.svTaxValueA,
-            "steuerwert_b": tax_statement.svTaxValueB,
-            "brutto_mit_vst": tax_statement.svGrossRevenueA,
-            "brutto_ohne_vst": tax_statement.svGrossRevenueB,
+            "steuerwert_ab": summary_steuerwert_ab,
+            "steuerwert_a": summary_steuerwert_a,
+            "steuerwert_b": summary_steuerwert_b,
+            "brutto_mit_vst": summary_brutto_a,
+            "brutto_ohne_vst": summary_brutto_b,
             "vst_anspruch": tax_statement.totalWithHoldingTaxClaim,
             "steuerwert_da1_usa": tax_statement.da1TaxValue,
             "brutto_da1_usa": tax_statement.da_GrossRevenue,
@@ -1702,6 +2093,8 @@ def render_tax_statement(
             "total_brutto_mit_vst": tax_statement.totalGrossRevenueA,
             "total_brutto_ohne_vst": tax_statement.totalGrossRevenueB,
             "total_brutto_gesamt": tax_statement.total_brutto_gesamt,
+            "liabilities_total": liabilities_total,
+            "liabilities_payments_total": liabilities_payments_total,
             "tax_period": tax_period,
             "period_end_date": period_end_date
         }
@@ -1757,6 +2150,21 @@ def render_tax_statement(
         story.append(Paragraph("* Manuell erfasster Preis (nicht aus der offiziellen Kursliste)", styles['Val_LEFT']))
         story.append(Spacer(1, 0.5*cm))
 
+    # --- Liabilities Section ---
+    liabilities_table = create_liabilities_table(tax_statement, styles, usable_width)
+    if liabilities_table:
+        story.append(PageBreak())
+        story.append(Paragraph("Schulden", title_style))
+        story.append(liabilities_table)
+        story.append(Spacer(1, 0.5*cm))
+
+    # Optional payment reconciliation pages before notices/barcode
+    reconciliation_flowables = create_payment_reconciliation_tables(tax_statement, styles, usable_width)
+    if reconciliation_flowables:
+        story.append(PageBreak())
+        story.append(Paragraph("Abgleich Kursliste / Brokerzahlungen", title_style))
+        story.extend(reconciliation_flowables)
+
     # Info pages before the barcode
     templates_path = Path(__file__).parent / 'templates'
     if use_minimal_frontpage:
@@ -1775,15 +2183,26 @@ def render_tax_statement(
     story.append(PageBreak())
     story.extend(create_single_info_page(tax_payer_markdown, styles, section='long-version'))
 
-    # Render critical warnings on the instructions page so users cannot miss them
-    story.extend(create_critical_warnings_flowables(critical_warnings, styles))
+    criticial_warnings_flowables = create_critical_warnings_flowables(critical_warnings, styles, usable_width)
+    if criticial_warnings_flowables:
+        story.append(PageBreak())
+        story.extend(criticial_warnings_flowables)
 
     # Add the barcode page
     make_barcode_pages(doc, story, tax_statement, title_style)
     
     # Build the PDF
-    doc.build(story)
-    
+    def _canvas_maker(*args, **kwargs):
+        return NumberedCanvas(
+            *args,
+            left_margin=left_margin,
+            right_margin=right_margin,
+            bottom_margin=bottom_margin,
+            **kwargs,
+        )
+
+    doc.build(story, canvasmaker=_canvas_maker)
+
     pdf_data = buffer.getvalue()
     buffer.close()
     

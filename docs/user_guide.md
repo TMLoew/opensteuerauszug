@@ -64,6 +64,44 @@ Using OpenSteuerAuszug to generate your Steuerauszug generally involves the foll
     * Remove any manual entries you may have used in previous years.
     * **Recalculate the tax information using the tax software**. Most tax software offers the ability to recompute tax values based on the latest Kursliste, accept that option.
 
+## Features
+
+### Payment Reconciliation
+
+OpenSteuerAuszug includes a powerful **Payment Reconciliation** feature (enabled by default). 
+
+When you run the tool with Kursliste data, it automatically compares the dividends and withholding taxes reported by your broker against the official values expected from the Kursliste for each security.
+
+*   **Discrepancy Reporting**: It identifies cases where the broker's reported income or withholding tax differs from the Kursliste.
+*   **DA-1 Confidence**: The reconciliation tables are particularly useful for building confidence that foreign withholding tax (e.g., US withholding on dividends) has actually occurred and matches the expected rates. This is essential when claiming tax credits via the **DA-1 form** in your Swiss tax return.
+*   **Detailed Tables**: The generated PDF includes reconciliation tables showing these comparisons, making it easy to spot missing dividends or incorrect tax withholdings.
+*   **Automatic Match Detection**: It accounts for common scenarios like accumulating funds (where no cash flow is expected) and small rounding differences.
+
+You can explicitly control this feature using:
+*   `--payment-reconciliation`: (Default) Enables the reconciliation phase and reports.
+*   `--no-payment-reconciliation`: Skips the reconciliation step.
+
+### Appending Additional Documents
+
+Often, you may want to include additional supporting documents (e.g., the original broker statement, US 1042-S forms, or other tax forms) in the same PDF as your Steuerauszug for archiving or submission purposes.
+
+OpenSteuerAuszug provides command-line options to prepend or append existing PDF files to the generated tax statement:
+
+*   `--pre-amble <file.pdf>`: Adds the specified PDF **before** the main tax statement.
+*   `--post-amble <file.pdf>`: Adds the specified PDF **after** the main tax statement.
+
+You can specify these options multiple times to add multiple files. The files will be added in the order they appear on the command line.
+
+**Note:** This feature performs a "naive concatenation." The added pages are attached exactly as they are; no page numbers, barcodes, or headers/footers are added or modified on these external documents.
+
+Example:
+```bash
+python -m opensteuerauszug.steuerauszug input.xml --importer ibkr \
+  --post-amble 1042-S_form.pdf \
+  --post-amble broker_statement.pdf \
+  -o final_tax_statement.pdf
+```
+
 ## Disclaimer and User Responsibility
 
 **Important**: OpenSteuerAuszug is provided "as is" without any formal audit or warranty. While it aims to be accurate, it is your responsibility as the taxpayer to:
@@ -82,35 +120,49 @@ The **Kursliste** is an official list published annually by the Swiss Federal Ta
 
 ### Obtaining the Kursliste
 
-You need to obtain the official Kursliste XML file for the relevant tax year. This is usually available for download from the [ESTV website](https://www.ictax.admin.ch/extern/en.html#/xml). Always down the latest file marked "Initial" in the latest format, V2.0 at this time). 
+You need the official Kursliste XML file for the relevant tax year.
 
-After unzipping, the file is typically named something like `kursliste_JJJJ.xml` (e.g., `kursliste_2023.xml`).
+#### Automated Download and Conversion (Recommended)
+
+OpenSteuerAuszug can automatically download, prepare, and convert the latest Kursliste for you. This is the simplest method.
+
+```bash
+python -m opensteuerauszug.kursliste download --year 2024
+```
+
+This command performs the following steps:
+1.  Fetches the latest "Initial" export in the best available format directly from the ESTV API.
+2.  Saves the XML file into your XDG data directory (e.g., `~/.local/share/opensteuerauszug/kursliste/kursliste_2024.xml`) or a directory specified by `--destination`.
+3.  **Automatically converts** the XML file into an optimized SQLite database (`kursliste_2024.sqlite`) in the same directory. This database is used for significantly faster processing.
+
+You can disable the automatic conversion with the `--no-convert` flag if desired.
+
+#### Manual Download and Conversion
+
+If you prefer to obtain the file manually or need to process a specific file:
+
+1.  **Download**:
+    *   Visit the [ESTV website](https://www.ictax.admin.ch/extern/en.html#/xml).
+    *   Download the latest file marked "Initial" for the relevant tax year (usually in the latest format, e.g., V2.2).
+    *   Unzip the file. It is typically named something like `kursliste_JJJJ.xml` (e.g., `kursliste_2023.xml`).
+
+2.  **Store**:
+    *   Place the XML file into the XDG data directory (e.g., `~/.local/share/opensteuerauszug/kursliste/`) or locally in `data/kursliste/`.
+
+3.  **Convert (Recommended)**:
+    *   For performance, convert the XML to SQLite using the integrated command:
+        ```bash
+        python -m opensteuerauszug.kursliste convert path/to/kursliste_2023.xml
+        ```
+    *   This will create `kursliste_2023.sqlite` next to the XML file.
+
+*(Note: A legacy script `scripts/convert_kursliste_to_sqlite.py` is also available but the CLI command is preferred.)*
 
 ### Storing the Kursliste
 
-Place the downloaded Kursliste XML file(s) into the `data/kursliste/` directory within your OpenSteuerAuszug project. The application will automatically detect files in this location.
+Place the downloaded Kursliste XML file(s) and generated SQLite database(s) into the XDG data directory or locally in `data/kursliste/`. The application will automatically detect files in these locations, prioritizing the XDG directory.
 
 For more detailed information on naming conventions and how OpenSteuerAuszug manages these files, please refer to the [Kursliste Data Management Guide](data/kursliste/kursliste.md).
-
-### Converting Kursliste XML to SQLite (Recommended)
-
-For significantly improved performance, especially with large Kursliste files or frequent use, it is **highly recommended** to convert the Kursliste XML file into an SQLite database. OpenSteuerAuszug includes a script for this purpose.
-
-**How to convert:**
-1.  Navigate to the root directory of the OpenSteuerAuszug project in your terminal.
-2.  Run the conversion script:
-    ```bash
-    python scripts/convert_kursliste_to_sqlite.py path/to/your/downloaded/kursliste_YYYY.xml data/kursliste/kursliste_YYYY.sqlite
-    ```
-    Replace `path/to/your/downloaded/kursliste_YYYY.xml` with the actual path to the XML file you downloaded from ESTV, and `kursliste_YYYY.sqlite` with the desired output name (keeping the year consistent).
-
-    **Example:**
-    ```bash
-    python scripts/convert_kursliste_to_sqlite.py ~/Downloads/kursliste_2023.xml data/kursliste/kursliste_2023.sqlite
-    ```
-3.  Ensure the generated `.sqlite` file is in the `data/kursliste/` directory.
-
-The application will then use this SQLite database for faster access to Kursliste data. For more technical details on the conversion process and database structure, see the [Kursliste Data Management Guide](data/kursliste/kursliste.md).
 
 ---
 
@@ -123,18 +175,25 @@ This is the primary use case for OpenSteuerAuszug: generating a PDF Steuerauszug
 To generate a Steuerauszug, you will need to provide the following:
 
 1.  **Broker Statements**: These are the reports or data files you download from your bank or financial institution. The required format varies by broker. See the specific importer documentation (linked under "Importing Data from Brokers" below) for details on what files are needed and how to obtain them.
-2.  **Configuration File (`config.toml`)**: This file tells OpenSteuerAuszug your personal details (name, canton for tax purposes), information about your financial institutions, and specific settings for each account. You must create this file in the root directory of the OpenSteuerAuszug project.
-3.  **Kursliste**: As described in the "Preparing the Kursliste" section, ensure you have the relevant Kursliste (preferably as an SQLite file in `data/kursliste/`) for the tax year you are processing.
+2.  **Configuration File (`config.toml`)**: This file tells OpenSteuerAuszug your personal details (name, canton for tax purposes), information about your financial institutions, and specific settings for each account. You can copy `config.template.toml` to `~/.config/opensteuerauszug/config.toml` or `config.toml` in the current directory. The file is optional.
+3.  **Kursliste**: As described in the "Preparing the Kursliste" section, ensure you have the relevant Kursliste (preferably as an SQLite file in the XDG data directory or `data/kursliste/`) for the tax year you are processing.
 
 ### Configuring OpenSteuerAuszug (`config.toml`)
 
-The `config.toml` file is crucial for tailoring OpenSteuerAuszug to your needs. It uses a hierarchical structure:
+The `config.toml` file is optional. It allows tailoring OpenSteuerAuszug to your needs, for example if you want to correct or extend broker exported data. To set it up:
+
+1. Copy the template: `cp config.template.toml ~/.config/opensteuerauszug/config.toml` (or keep it locally as `config.toml`)
+2. Edit the file with your personal information
+
+The configuration uses a hierarchical structure:
 
 *   `[general]` settings apply globally (e.g., your name, canton).
 *   `[brokers.<BrokerName>]` settings apply to a specific financial institution.
 *   `[brokers.<BrokerName>.accounts.<AccountName>]` settings apply to a specific account, including the **mandatory `account_number`**.
 
 For detailed instructions on how to structure your `config.toml` file, what settings are available, and examples, please refer to the [Configuration Guide](config.md).
+
+**Note:** The `config.toml` file is ignored by git to protect your personal data. If it's not present, the application will still run but may require configuration settings via command-line arguments.
 
 ### Importing Data from Brokers
 
@@ -177,7 +236,7 @@ Remember the calculations in this software are not formally audited.
 
 #### Advanced Options
 
-Neither of the the following options is currently complete and should not be used.
+Neither of the following options is currently complete and should not be used.
 
 * In the future a mode will be provided to sanity check the kursliste calculations against reported income and tax withholding with the bank, however this currently must be done manually.
 

@@ -710,7 +710,7 @@ class Kursliste(PydanticXmlModel, tag="kursliste", nsmap=NSMAP):
     # --- Attributes aligned with XSD ---
     version: Annotated[str, StringConstraints(pattern=r"2\.[02]\.0\.\d")] = attr()
     creationDate: datetime.datetime = attr()
-    referingToDate: Optional[datetime.date] = attr(default=None)
+    referingToDate: Optional[datetime.date] = attr(default=None) # do NOT rename to referringToDate, aligned with XSD
     year: int = attr()
     # --- End Attributes ---
 
@@ -732,9 +732,9 @@ class Kursliste(PydanticXmlModel, tag="kursliste", nsmap=NSMAP):
     sectors: List[Sector] = element(tag="sector", default_factory=list)
     shortCuts: List[ShortCut] = element(tag="shortCut", default_factory=list)
     signs: List[Sign] = element(tag="sign", default_factory=list)
+    capitalisationRates: List[CapitalisationRate] = element(tag="capitalisationRate", default_factory=list)
     da1Rates: List[Da1Rate] = element(tag="da1Rate", default_factory=list)
     mediumTermBonds: List[MediumTermBond] = element(tag="mediumTermBond", default_factory=list)
-    capitalisationRates: List[CapitalisationRate] = element(tag="capitalisationRate", default_factory=list)
 
     institutions: List[Institution] = element(tag="institution", default_factory=list)
     bonds: List[Bond] = element(tag="bond", default_factory=list)

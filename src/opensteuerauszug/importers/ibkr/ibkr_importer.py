@@ -1,7 +1,7 @@
 import os
 import csv
 import logging
-from typing import Final, List, Any, Dict, Literal, get_args, cast, Optional
+from typing import Final, List, Any, Dict, Literal, Optional, get_args, cast
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from collections import defaultdict
@@ -165,8 +165,8 @@ class IbkrImporter:
             #     f"{self.account_settings_list[0].account_id}"
             # )
 
-    def _aggregate_stocks_by_date(self, stocks: List[SecurityStock]) -> List[SecurityStock]:
-        """Aggregate buy and sell entries on the same date without reordering."""
+    def _aggregate_stocks(self, stocks: List[SecurityStock]) -> List[SecurityStock]:
+        """Aggregate buy and sell entries on the same date with equal order id if present without reordering."""
 
         aggregated: List[SecurityStock] = []
         pending: SecurityStock | None = None
@@ -176,16 +176,17 @@ class IbkrImporter:
                 if (
                     pending
                     and pending.referenceDate == stock.referenceDate
+                    and pending.orderId == stock.orderId
                     and pending.balanceCurrency == stock.balanceCurrency
                     and pending.quotationType == stock.quotationType
                     # test for same sign of quantity
                     and (pending.quantity * stock.quantity) > 0
                 ):
-                    pending.quantity += stock.quantity
-                    if pending.quantity > 0:
-                        pending.name = "Buy"
-                    else:
-                        pending.name = "Sell"
+                    total_quantity = pending.quantity + stock.quantity
+                    if pending.unitPrice != stock.unitPrice:
+                        pending.unitPrice = (pending.quantity * pending.unitPrice + stock.quantity * stock.unitPrice) / total_quantity
+
+                    pending.quantity = total_quantity
                 else:
                     if pending:
                         aggregated.append(pending)
@@ -193,7 +194,9 @@ class IbkrImporter:
                         referenceDate=stock.referenceDate,
                         mutation=True,
                         quantity=stock.quantity,
+                        unitPrice=stock.unitPrice,
                         name=stock.name,
+                        orderId=stock.orderId,
                         balanceCurrency=stock.balanceCurrency,
                         quotationType=stock.quotationType,
                     )
@@ -379,10 +382,28 @@ class IbkrImporter:
         # Key: SecurityPosition or tuple for cash. Value: dict with 'stocks', 'payments'
         processed_security_positions: defaultdict[SecurityPosition, Dict[str, list]] = \
             defaultdict(lambda: {'stocks': [], 'payments': []})
+
+        # Metadata for security names: {SecurityPosition: {'best_name': str, 'priority': int}}
+        security_name_metadata: defaultdict[SecurityPosition, Dict[str, Any]] = \
+            defaultdict(lambda: {'best_name': None, 'priority': -1})
+
         processed_cash_positions: defaultdict[tuple, Dict[str, list]] = \
             defaultdict(lambda: {'stocks': [], 'payments': []})
         security_country_map: Dict[SecurityPosition, str] = {}
+
+        # Map to store assetCategory and subCategory for each security
+        security_asset_category_map: Dict[SecurityPosition, tuple[str, Optional[str]]] = {}
         rights_issue_positions: set[SecurityPosition] = set()
+
+        def _update_security_name_metadata(
+            sec_pos: SecurityPosition,
+            name: str,
+            priority: int,
+        ) -> None:
+            entry = security_name_metadata[sec_pos]
+            if priority > entry['priority']:
+                entry['best_name'] = name
+                entry['priority'] = priority
 
         for stmt in all_flex_statements:
             account_id = self._get_required_field(
@@ -481,6 +502,15 @@ class IbkrImporter:
                         symbol=conid,
                         description=f"{description} ({symbol})"
                     )
+
+                    # Update name metadata (Priority: 8 for Trades)
+                    _update_security_name_metadata(sec_pos, f"{description} ({symbol})", 8)
+
+                    # Store assetCategory and subCategory
+                    sub_category = getattr(trade, 'subCategory', None)
+                    if sec_pos not in security_asset_category_map:
+                        security_asset_category_map[sec_pos] = (asset_category, sub_category)
+
                     trade_country = self._normalize_country_code(
                         getattr(trade, 'issuerCountryCode', None)
                     )
@@ -495,8 +525,9 @@ class IbkrImporter:
                         referenceDate=trade_date,
                         mutation=True,
                         quantity=quantity,
-                        name=f"{buy_sell} {abs(quantity)} {symbol} "
-                             f"@ {trade_price} {currency}",
+                        unitPrice=trade_price if trade_price != Decimal(0) else None,
+                        name=buy_sell.value,
+                        orderId=trade.ibOrderID,
                         balanceCurrency=currency,
                         quotationType="PIECE"
                     )
@@ -563,6 +594,15 @@ class IbkrImporter:
                         symbol=conid,
                         description=f"{description} ({symbol})"
                     )
+
+                    # Update name metadata (Priority: 10 for OpenPositions)
+                    _update_security_name_metadata(sec_pos, f"{description} ({symbol})", 10)
+
+                    # Store assetCategory and subCategory
+                    sub_category = getattr(open_pos, 'subCategory', None)
+                    if sec_pos not in security_asset_category_map:
+                        security_asset_category_map[sec_pos] = (asset_category, sub_category)
+
                     position_country = self._normalize_country_code(
                         getattr(open_pos, 'issuerCountryCode', None)
                     )
@@ -591,7 +631,9 @@ class IbkrImporter:
                 for transfer in stmt.Transfers:
                     if should_skip_entry(transfer, "Transfer"):
                         continue
-                    asset_category = transfer.assetCategory
+                    asset_category = self._get_required_field(
+                        transfer, 'assetCategory', 'Transfer'
+                    )
                     asset_cat_val = (
                         asset_category.value if hasattr(asset_category, 'value') else str(asset_category)
                     )
@@ -620,12 +662,13 @@ class IbkrImporter:
 
                     direction = transfer.direction
                     direction_val = direction.value.upper() if direction else None
-                    if direction_val == 'OUT' and quantity > 0:
+                    is_cancel = ibflex.Code.CANCEL in (transfer.code or ())
+                    if direction_val == 'OUT' and quantity > 0 and not is_cancel:
                         raise ValueError(
                             f"Transfer direction OUT but quantity {quantity} positive"
                             f" for {symbol}"
                         )
-                    if direction_val == 'IN' and quantity < 0:
+                    if direction_val == 'IN' and quantity < 0 and not is_cancel:
                         raise ValueError(
                             f"Transfer direction IN but quantity {quantity} negative"
                             f" for {symbol}"
@@ -649,11 +692,14 @@ class IbkrImporter:
                         description=f"{description} ({symbol})",
                     )
 
+                    # Update name metadata (Priority: 5 for Transfers)
+                    _update_security_name_metadata(sec_pos, f"{description} ({symbol})", 5)
+
                     stock_mutation = SecurityStock(
                         referenceDate=tx_date,
                         mutation=True,
                         quantity=quantity,
-                        name=f"{transfer_type_val} {account}",
+                        name=f"{transfer_type_val} {account}" + (" (Cancelled)" if is_cancel else ""),
                         balanceCurrency=currency,
                         quotationType="PIECE",
                     )
@@ -699,6 +745,34 @@ class IbkrImporter:
                         symbol=conid,
                         description=f"{description} ({symbol})",
                     )
+
+                    # Update name metadata for CorporateActions
+                    # Priority logic:
+                    # - Issuer available: 4
+                    # - Description only (short): 1
+                    # - Description only (long): 0 (use symbol fallback via helper logic if priority 0 beats existing)
+                    # Actually, if description is long, we prefer symbol.
+                    # Let's say:
+                    # - Issuer: 4
+                    # - Description <= 50 chars: 1
+                    # - Description > 50 chars: -1 (Don't use if possible, prefer symbol if nothing else)
+
+                    issuer = getattr(action, "issuer", None)
+                    ca_name = f"{description} ({symbol})"
+                    ca_priority = 1
+
+                    if issuer:
+                        ca_name = f"{issuer} ({symbol})"
+                        ca_priority = 4
+                    elif len(description) > 50:
+                        # Long description and no issuer. Prefer symbol (short name).
+                        ca_name = f"{symbol} ({symbol})"
+                        ca_priority = 2
+                    else:
+                        ca_name = f"{description} ({symbol})"
+                        ca_priority = 3
+
+                    _update_security_name_metadata(sec_pos, ca_name, ca_priority)
 
                     sub_category = getattr(action, "subCategory", None)
                     if sub_category == "RIGHT":
@@ -763,7 +837,8 @@ class IbkrImporter:
 
                     if security_id:
                         tx_type_str = tx_type.value
-                        assert 'interest' not in str(tx_type_str).lower()
+                        tx_type_str_lower = str(tx_type_str).lower()
+                        assert 'interest' not in tx_type_str_lower
 
                         sec_pos_key = None
                         for pos in processed_security_positions.keys():
@@ -771,9 +846,10 @@ class IbkrImporter:
                                 sec_pos_key = pos
                                 break
 
+                        sym_attr = cash_tx.symbol
+
                         if sec_pos_key is None:
                             isin_attr = cash_tx.isin
-                            sym_attr = cash_tx.symbol
                             sec_pos_key = SecurityPosition(
                                 depot=account_id,
                                 valor=None,
@@ -784,14 +860,34 @@ class IbkrImporter:
                                 ),
                             )
 
+                        # Update name metadata (Priority: 0 for CashTransactions - lowest)
+                        # Use description or symbol if description is generic?
+                        # Usually description in CashTx is like "Dividend ...". Not great for security name.
+                        # But if it's the only source, it's better than nothing.
+                        _update_security_name_metadata(
+                            sec_pos_key,
+                            f"{description} ({sym_attr})" if sym_attr else description,
+                            0
+                        )
+
                         sec_payment = SecurityPayment(
                             paymentDate=tx_date,
                             name=description,
                             amountCurrency=currency,
                             amount=amount,
                             quotationType='PIECE',
-                            quantity=UNINITIALIZED_QUANTITY
+                            quantity=UNINITIALIZED_QUANTITY,
+                            broker_label_original=tx_type_str,
                         )
+
+                        if "withholding" in tx_type_str_lower:
+                            if amount < 0:
+                                if currency == "CHF":
+                                    sec_payment.withHoldingTaxClaim = abs(amount)
+                                else:
+                                    sec_payment.nonRecoverableTaxAmountOriginal = abs(amount)
+                            elif amount > 0:
+                                sec_payment.grossRevenueB = amount
                         processed_security_positions[sec_pos_key]['payments'].append(
                             sec_payment
                         )
@@ -800,9 +896,14 @@ class IbkrImporter:
                             # Not Tax Relant event
                             continue
                         elif tx_type in [ibflex.CashAction.BROKERINTPAID]:
-                            # TODO: Optionally create a liabilities section.
-                            logger.debug(f"Broker interest paid for {description} is not handled for liabilities.")
-                            continue
+                            # Interst paid due to negative balance: description starting with "<CURRENCY> DEBIT INT FOR"
+                            if description.startswith(f"{currency} DEBIT INT FOR"):
+                                # Tax relevant event. Fall through to create a bank payment.
+                                pass
+                            else:
+                                # TODO: CREDIT INT is charged on positive balance and would belong to fees (not liabilities).
+                                logger.warning(f"Broker credit interest payment {description} with amount {amount} is not handled, would belong to fees.")
+                                continue
                         elif tx_type in [ibflex.CashAction.FEES]:
                             # TODO: Optionally create a costs sections.
                             logger.debug(f"Fees paid for {description} are ignored for statement.")
@@ -815,9 +916,9 @@ class IbkrImporter:
                             # Tax relevant event. Fall through to create a bank payment.
                             pass
                         elif tx_type in [ibflex.CashAction.WHTAX]:
-                            # Withholding tax on interest - already accounted for in net interest received
-                            logger.debug(f"Withholding tax on interest for {description} is ignored (already netted).")
-                            continue
+                            # Withholding tax not linked to a security (e.g. yield enhancement).
+                            # Tax relevant event. Fall through to create a bank payment.
+                            pass
                         else:
                             raise ValueError(f"CashTransaction type {tx_type} is not supported for {description}")
                         cash_pos_key = (account_id, currency, "MAIN_CASH")
@@ -838,7 +939,7 @@ class IbkrImporter:
         sec_pos_idx = 0
         for sec_pos_obj, data in processed_security_positions.items():
             sec_pos_idx += 1
-            sorted_stocks = self._aggregate_stocks_by_date(data['stocks'])
+            sorted_stocks = self._aggregate_stocks(data['stocks'])
             sorted_payments = sorted(
                 data['payments'], key=lambda p: p.paymentDate
             )
@@ -869,17 +970,11 @@ class IbkrImporter:
                     )
 
             # TODO: Map assetCategory to eCH-0196 SecurityCategory
-            # Attempt to get assetCategory, default to "STK"
-            asset_cat_source = None
-            if sorted_stocks and hasattr(sorted_stocks[0], 'assetCategory'):
-                asset_cat_source = sorted_stocks[0]
-            # Payments don't usually have assetCategory
-            elif sorted_payments and hasattr(sorted_payments[0], 'assetCategory'):
-                asset_cat_source = sorted_payments[0]
-
-            asset_cat = (
-                asset_cat_source.assetCategory if asset_cat_source else 'STK'
-            )
+            # Get assetCategory and subCategory from the map, default to "STK"
+            asset_cat = 'STK'
+            sub_category = None
+            if sec_pos_obj in security_asset_category_map:
+                asset_cat, sub_category = security_asset_category_map[sec_pos_obj]
 
             sec_category = IBKR_ASSET_CATEGORY_TO_ECH_SECURITY_CATEGORY.get(asset_cat)
             if not sec_category:
@@ -903,12 +998,18 @@ class IbkrImporter:
                 # Allow negative balances for short positions
                 opening_balance = tentative_opening
 
-            # Log negative balances (short positions) but don't fail
+            # Log negative balances (short positions)
             if opening_balance < 0 or closing_balance < 0:
-                logger.info(
-                    f"Short position detected for security {sec_pos_obj.symbol} "
-                    f"(start {opening_balance}, end {closing_balance})"
-                )
+                if asset_cat == "OPT" and sub_category == "C":
+                    logger.warning(
+                        f"Negative balance computed for security {sec_pos_obj.symbol} with OPT/C. In case you expect short positions, this is fine. Otherwise, please report this to the developers for further investigation."
+                        f" (start {opening_balance}, end {closing_balance})"
+                    )
+                else:
+                    raise ValueError(
+                        f"Negative balance computed for security {sec_pos_obj.symbol}. In case you expect short positions, please report this to the developers for further investigation."
+                        f" (start {opening_balance}, end {closing_balance})"
+                    )
 
             # Check if this is a rights issue and if we should skip it
             is_rights_issue = sec_pos_obj in rights_issue_positions
@@ -931,7 +1032,7 @@ class IbkrImporter:
                 (not s.mutation and s.referenceDate == self.period_from)
                 for s in sorted_stocks
             )
-            if not start_exists:
+            if not start_exists and opening_balance != 0:
                 sorted_stocks.append(
                     SecurityStock(
                         referenceDate=self.period_from,
@@ -963,12 +1064,25 @@ class IbkrImporter:
                 sorted_stocks, key=lambda s: (s.referenceDate, s.mutation)
             )
 
+            # Determine best security name
+            name_metadata = security_name_metadata[sec_pos_obj]
+            best_name = name_metadata['best_name']
+
+            if best_name:
+                final_security_name = best_name
+            else:
+                # Fallback to description from position key or just symbol
+                if sec_pos_obj.description:
+                    final_security_name = sec_pos_obj.description
+                else:
+                    final_security_name = sec_pos_obj.symbol
+
             sec = Security(
                 positionId=sec_pos_idx,
                 currency=primary_currency,
                 quotationType=primary_quotation_type,
                 securityCategory=sec_category,
-                securityName=sec_pos_obj.description or sec_pos_obj.symbol,
+                securityName=final_security_name,
                 isin=ISINType(sec_pos_obj.isin) if sec_pos_obj.isin is not None else None,
                 valorNumber=sec_pos_obj.valor,
                 country=security_country_map.get(sec_pos_obj, "US"),

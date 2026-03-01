@@ -19,6 +19,7 @@ from typing import (
     Annotated,
 )
 from datetime import date, datetime
+from enum import Enum
 from decimal import Decimal
 import lxml.etree as ET
 from inspect import isclass  # Add import for isclass function
@@ -26,6 +27,7 @@ import logging
 import re
 
 from opensteuerauszug.model.critical_warning import CriticalWarning
+from opensteuerauszug.model.payment_reconciliation import PaymentReconciliationReport
 
 logger = logging.getLogger(__name__)
 
@@ -993,11 +995,6 @@ class LiabilityAccount(BaseXmlModel):
     bankAccountCurrency: CurrencyId = Field(..., pattern=r"[A-Z]{3}", json_schema_extra={'is_attribute': True})
     openingDate: Optional[date] = Field(default=None, json_schema_extra={'is_attribute': True})
     closingDate: Optional[date] = Field(default=None, json_schema_extra={'is_attribute': True})
-    liabilityCategory: Optional[LiabilityCategory] = Field(
-        default=None, 
-        description="The category of the liability (MORTGAGE, LOAN, or OTHER)",
-        json_schema_extra={'is_attribute': True}
-    )
     totalTaxValue: PositiveDecimal = Field(
         ..., 
         description="Total of the tax values (absolute value ≥ 0) of negative tax values (debts), rounded according to DIN 1333",
@@ -1085,6 +1082,14 @@ class SecurityTaxValue(BaseXmlModel):
     }
 
 
+class PaymentTypeOriginal(str, Enum):
+    STANDARD = "0"
+    GRATIS = "1"
+    OTHER_BENEFIT = "2"
+    AGIO = "3"
+    FUND_ACCUMULATION = "5"
+
+
 class SecurityPurchaseDisposition(BaseXmlModel):
     """Represents purchase or disposition of a security for IUP calculation."""
     # Required attributes
@@ -1142,6 +1147,12 @@ class SecurityPayment(BaseXmlModel):
     undefined: Optional[bool] = Field(default=None, json_schema_extra={'is_attribute': True})
     kursliste: Optional[bool] = Field(default=None, json_schema_extra={'is_attribute': True})
     sign: Optional[str] = Field(default=None, json_schema_extra={'is_attribute': True})
+
+    # Internal evidence metadata (never serialized to XML).
+    # Preserve original broker text only when needed for reconciliation output.
+    broker_label_original: Optional[str] = Field(default=None, exclude=True)
+    nonRecoverableTaxAmountOriginal: Optional[Decimal] = Field(default=None, exclude=True)
+    payment_type_original: Optional[PaymentTypeOriginal] = Field(default=None, exclude=True)
     
     model_config = {
         "json_schema_extra": {'tag_name': 'payment', 'tag_namespace': NS_MAP['eCH-0196']}
@@ -1168,7 +1179,11 @@ class SecurityStock(BaseXmlModel):
     value: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
     blocked: Optional[bool] = Field(default=None, json_schema_extra={'is_attribute': True})
     blockingTo: Optional[date] = Field(default=None, json_schema_extra={'is_attribute': True})
-    
+
+    # Opaque helper string that allows importers extra structure. Not used in calculation
+    # or in the export.
+    orderId: Optional[str] = Field(default=None, exclude=True)
+
     model_config = {
         "json_schema_extra": {'tag_name': 'stock', 'tag_namespace': NS_MAP['eCH-0196']},
     }
@@ -1212,6 +1227,7 @@ class Security(BaseXmlModel):
     totalWithHoldingTaxClaim: Optional[Decimal] = Field(default=None, exclude=True)
     totalNonRecoverableTax: Optional[Decimal] = Field(default=None, exclude=True)
     totalAdditionalWithHoldingTaxUSA: Optional[Decimal] = Field(default=None, exclude=True)
+    broker_payments: List[SecurityPayment] = Field(default_factory=list, exclude=True)
     is_rights_issue: bool = Field(default=False, exclude=True)
     model_config = {
         "json_schema_extra": {'tag_name': 'security', 'tag_namespace': NS_MAP['eCH-0196']}
@@ -1307,16 +1323,68 @@ class TaxStatementBase(BaseXmlModel):
     totalWithHoldingTaxClaim: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True}) # required in XSD
 
     def validate_model(self):
-        """Placeholder for schema validation logic."""
-        # TODO: Implement validation based on XSD rules (required fields, types, constraints)
-        logger.info("Validation logic not yet implemented.")
-        # Example checks:
-        # if self.id is None:
-        #     raise ValueError("'id' attribute is required")
-        # if not self.client:
-        #     raise ValueError("At least one 'client' element is required")
-        # ... etc.
-        return True
+        """Validate the tax statement model against the eCH-0196 XSD schema.
+
+        Raises:
+            ValueError: If XSD validation fails
+
+        Returns:
+            bool: True if validation passes
+        """
+        from pathlib import Path
+
+        specs_dir = Path("specs")
+        xsd_path = specs_dir / "eCH-0196-2-2.xsd"
+
+        if not xsd_path.exists():
+            logger.warning(f"XSD schema file not found at {xsd_path}. Skipping validation.")
+            return True
+
+        # Custom resolver to handle schema imports
+        class _LocalXsdResolver(ET.Resolver):
+            def __init__(self, specs_directory: Path) -> None:
+                super().__init__()
+                self._specs_dir = specs_directory
+
+            def resolve(self, url, pubid, context):
+                if not url:
+                    return None
+                basename = url.rsplit("/", 1)[-1]
+                candidate = self._specs_dir / basename
+                if candidate.exists():
+                    return self.resolve_filename(str(candidate), context)
+                return None
+
+        try:
+            # Parse the XSD schema
+            xsd_parser = ET.XMLParser()
+            xsd_parser.resolvers.add(_LocalXsdResolver(specs_dir))
+            schema_doc = ET.parse(str(xsd_path), parser=xsd_parser)
+            schema = ET.XMLSchema(schema_doc)
+
+            # Convert the model to XML
+            xml_bytes = self.to_xml_bytes()
+            xml_doc = ET.fromstring(xml_bytes)
+
+            # Validate against the schema
+            if not schema.validate(xml_doc):
+                error_log = schema.error_log
+                error_messages = [str(error) for error in error_log]
+                error_message = "XSD validation failed:\n  " + "\n  ".join(error_messages)
+                logger.error(error_message)
+                raise ValueError(error_message)
+
+            logger.info("XSD validation successful.")
+            return True
+
+        except ET.XMLSyntaxError as e:
+            error_message = f"XML syntax error during validation: {e}"
+            logger.error(error_message)
+            raise ValueError(error_message)
+        except Exception as e:
+            error_message = f"Validation error: {e}"
+            logger.error(error_message)
+            raise ValueError(error_message)
 
 
 # Final root model including the minorVersion attribute
@@ -1330,6 +1398,10 @@ class TaxStatement(TaxStatementBase):
     svTaxValueB: Optional[Decimal] = Field(default=None, exclude=True)
     svGrossRevenueA: Optional[Decimal] = Field(default=None, exclude=True)
     svGrossRevenueB: Optional[Decimal] = Field(default=None, exclude=True)
+    summaryTaxValueA: Optional[Decimal] = Field(default=None, exclude=True)
+    summaryTaxValueB: Optional[Decimal] = Field(default=None, exclude=True)
+    summaryGrossRevenueA: Optional[Decimal] = Field(default=None, exclude=True)
+    summaryGrossRevenueB: Optional[Decimal] = Field(default=None, exclude=True)
     da1TaxValue: Optional[Decimal] = Field(default=Decimal('0'), exclude=True)
     da_GrossRevenue: Optional[Decimal] = Field(default=Decimal('0'), exclude=True)
     pauschale_da1: Optional[Decimal] = Field(default=Decimal('0'), exclude=True)
@@ -1340,6 +1412,7 @@ class TaxStatement(TaxStatementBase):
     # Critical warnings collected during import and calculation phases.
     # These are NOT serialized to XML – they are used only for PDF rendering.
     critical_warnings: List["CriticalWarning"] = Field(default_factory=list, exclude=True)
+    payment_reconciliation_report: Optional[PaymentReconciliationReport] = Field(default=None, exclude=True)
 
     model_config = {
         "json_schema_extra": {'tag_name': 'taxStatement', 'tag_namespace': NS_MAP['eCH-0196']}

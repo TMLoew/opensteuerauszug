@@ -5,7 +5,11 @@ from typing import List, Optional, Dict, Any, cast, get_args # Added get_args im
 # Removed pandas import
 from decimal import Decimal
 import logging
-from opensteuerauszug.model.ech0196 import SecurityTaxValue, TaxStatement, SecurityStock, BankAccountPayment, SecurityPayment, Client, ClientNumber, CantonAbbreviation
+from opensteuerauszug.model.ech0196 import (
+    SecurityTaxValue, TaxStatement, SecurityStock, BankAccountPayment, SecurityPayment,
+    Client, ClientNumber, CantonAbbreviation, LiabilityAccount, LiabilityAccountTaxValue,
+    ListOfLiabilities, BankAccountName, CountryIdISO2Type, CurrencyId, LiabilityAccountPayment
+)
 from opensteuerauszug.model.critical_warning import CriticalWarning, CriticalWarningCategory
 from opensteuerauszug.util.sorting import find_index_of_date, sort_security_stocks, sort_payments, sort_security_payments
 from opensteuerauszug.config.models import GeneralSettings
@@ -30,13 +34,14 @@ class CleanupCalculator:
                  importer_name: str, # Added importer_name parameter
                  identifier_map: Optional[Dict[str, Dict[str, Any]]] = None,
                  enable_filtering: bool = True,
-                 
+                 override_org_nr: Optional[str] = None,
                  config_settings: Optional[GeneralSettings] = None):
         self.period_from = period_from
         self.period_to = period_to
         self.importer_name = importer_name # Store importer_name
         self.identifier_map = identifier_map
         self.enable_filtering = enable_filtering
+        self.override_org_nr = override_org_nr
         self.config_settings = config_settings
         self.modified_fields: List[str] = []
 
@@ -78,7 +83,7 @@ class CleanupCalculator:
 
         # 2. Clearing Number (5 digits, numeric)
         # Use the existing compute_org_nr function which generates fake clearing numbers
-        clearing_number = compute_org_nr(statement, override_org_nr=None)
+        clearing_number = compute_org_nr(statement, override_org_nr=self.override_org_nr)
         # clearing_number is already a 5-digit string
 
         # 3. Customer ID (14 chars, alphanumeric): prefix normalized importer name then account id
@@ -228,6 +233,8 @@ class CleanupCalculator:
             #    # statement.id will remain None, allowing process to potentially continue
 
         # Process Bank Accounts
+        liabilities_to_add: List[LiabilityAccount] = []
+
         if statement.listOfBankAccounts and statement.listOfBankAccounts.bankAccount:
             for idx, bank_account in enumerate(statement.listOfBankAccounts.bankAccount):
                 account_id = bank_account.bankAccountNumber or bank_account.iban or f"BankAccount_{idx+1}"
@@ -252,6 +259,47 @@ class CleanupCalculator:
                         bank_account.closingDate = None
                         self.modified_fields.append(f"{account_id}.closingDate (cleared)")
 
+                # Handle negative bank account balance
+                if bank_account.taxValue and bank_account.taxValue.balance is not None:
+                    if bank_account.taxValue.balance < 0:
+                        negative_balance = abs(bank_account.taxValue.balance)
+                        negative_value = abs(bank_account.taxValue.value) if bank_account.taxValue.value is not None else negative_balance
+
+                        logger.info(
+                            f"  BankAccount {account_id}: Found negative balance {bank_account.taxValue.balance}. "
+                            f"Creating liability account and setting balance to 0."
+                        )
+
+                        liability_name = str(bank_account.bankAccountName) or account_id
+
+                        # Create liability account from the negative bank account
+                        liability_account = LiabilityAccount(
+                            iban=bank_account.iban,
+                            bankAccountNumber=bank_account.bankAccountNumber,
+                            bankAccountName=BankAccountName(liability_name),
+                            bankAccountCountry=bank_account.bankAccountCountry or CountryIdISO2Type("CH"),
+                            bankAccountCurrency=bank_account.bankAccountCurrency or CurrencyId("CHF"),
+                            openingDate=bank_account.openingDate,
+                            closingDate=bank_account.closingDate,
+                            totalTaxValue=negative_value,
+                            totalGrossRevenueB=Decimal("0"),
+                            taxValue=LiabilityAccountTaxValue(
+                                referenceDate=bank_account.taxValue.referenceDate,
+                                name=bank_account.taxValue.name,
+                                balanceCurrency=bank_account.taxValue.balanceCurrency,
+                                balance=negative_balance,
+                                exchangeRate=bank_account.taxValue.exchangeRate,
+                                value=negative_value
+                            )
+                        )
+                        liabilities_to_add.append(liability_account)
+                        self.modified_fields.append(f"{account_id}.taxValue (converted to liability)")
+
+                        # Set bank account balance to 0
+                        bank_account.taxValue.balance = Decimal("0")
+                        bank_account.taxValue.value = Decimal("0")
+                        self.modified_fields.append(f"{account_id}.taxValue.balance (set to 0)")
+
                 if bank_account.payment:
                     original_payment_count = len(bank_account.payment)
 
@@ -273,8 +321,99 @@ class CleanupCalculator:
                         else:
                             logger.info(f"  BankAccount {account_id}: Payment filtering skipped (tax period not fully defined).")
                     # No log if filtering is disabled globally
+
+                    # Move negative payments to liabilities
+                    negative_payments = [p for p in bank_account.payment if p.amount is not None and p.amount < 0]
+                    if negative_payments:
+                        # Create liability account payments from negative bank account payments
+                        liability_payments = [
+                            LiabilityAccountPayment(
+                                paymentDate=p.paymentDate,
+                                name=p.name,
+                                amountCurrency=p.amountCurrency,
+                                amount=abs(p.amount)  # Store as positive
+                            )
+                            for p in negative_payments
+                        ]
+
+                        # Find or create liability account for this currency
+                        currency = bank_account.bankAccountCurrency or CurrencyId("CHF")
+
+                        # Check if liability account already exists for this currency
+                        existing_liability = None
+                        if statement.listOfLiabilities and statement.listOfLiabilities.liabilityAccount:
+                            for liability in statement.listOfLiabilities.liabilityAccount:
+                                if (liability.bankAccountNumber == bank_account.bankAccountNumber and
+                                    liability.bankAccountCurrency == currency):
+                                    existing_liability = liability
+                                    break
+
+                        # Also check in liabilities_to_add (from negative balances processed earlier)
+                        if not existing_liability:
+                            for liability in liabilities_to_add:
+                                if (liability.bankAccountNumber == bank_account.bankAccountNumber and
+                                    liability.bankAccountCurrency == currency):
+                                    existing_liability = liability
+                                    break
+
+                        if existing_liability:
+                            # Append to existing liability account
+                            if existing_liability.payment is None:
+                                existing_liability.payment = []
+                            existing_liability.payment.extend(liability_payments)
+                            # Update totalGrossRevenueB to include the new payments
+                            if existing_liability.totalGrossRevenueB is None:
+                                existing_liability.totalGrossRevenueB = Decimal("0")
+                            existing_liability.totalGrossRevenueB += sum(abs(p.amount) for p in liability_payments if p.amount)
+                            logger.info(
+                                f"  BankAccount {account_id}: Moved {len(negative_payments)} negative payments to existing liability account."
+                            )
+                        else:
+                            # Create new liability account
+                            if statement.listOfLiabilities is None:
+                                statement.listOfLiabilities = ListOfLiabilities()
+
+                            liability_account = LiabilityAccount(
+                                iban=bank_account.iban,
+                                bankAccountNumber=bank_account.bankAccountNumber,
+                                bankAccountName=bank_account.bankAccountName,
+                                bankAccountCountry=bank_account.bankAccountCountry or CountryIdISO2Type("CH"),
+                                bankAccountCurrency=currency,
+                                openingDate=bank_account.openingDate,
+                                closingDate=bank_account.closingDate,
+                                payment=liability_payments,
+                                totalTaxValue=Decimal("0"),
+                                totalGrossRevenueB=sum(abs(p.amount) for p in liability_payments if p.amount),
+                                taxValue=LiabilityAccountTaxValue(
+                                    referenceDate=self.period_to,
+                                    name="Interest Payments",
+                                    balanceCurrency=currency,
+                                    balance=Decimal("0"),
+                                    value=Decimal("0")
+                                )
+                            )
+                            statement.listOfLiabilities.liabilityAccount.append(liability_account)
+                            logger.info(
+                                f"  BankAccount {account_id}: Created new liability account for {len(negative_payments)} negative payments."
+                            )
+
+                        # Remove negative payments from bank account
+                        bank_account.payment = [p for p in bank_account.payment if p.amount is None or p.amount >= 0]
+                        self.modified_fields.append(f"{account_id}.payment (moved negative to liabilities)")
+
         else:
             logger.info("No bank accounts found to process.")
+
+        # Add any liabilities created from negative bank account balances
+        if liabilities_to_add:
+            if statement.listOfLiabilities is None:
+                statement.listOfLiabilities = ListOfLiabilities()
+                logger.info(f"Created listOfLiabilities to hold {len(liabilities_to_add)} liability account(s) from negative bank balances.")
+
+            # Add the new liabilities
+            statement.listOfLiabilities.liabilityAccount.extend(liabilities_to_add)
+            logger.info(f"Added {len(liabilities_to_add)} liability account(s) from negative bank account balances.")
+            self.modified_fields.append(f"listOfLiabilities (added {len(liabilities_to_add)} accounts from negative balances)")
 
         # Process Securities Accounts
         if statement.listOfSecurities and statement.listOfSecurities.depot:
@@ -347,11 +486,17 @@ class CleanupCalculator:
                                 )
                             )
 
+                        full_stock_history: List[SecurityStock] = []
                         if security.stock:
                             original_stock_count = len(security.stock)
 
                             # Sort stock events (silently)
                             security.stock = sort_security_stocks(security.stock)
+
+                            # Keep the full, sorted stock history for quantity reconciliation
+                            # even if we filter security.stock for the final XML representation.
+                            full_stock_history = list(security.stock)
+
                             # End of period balances are reflected in the tax value
                             if self.period_to:
                                 period_end_plus_one = self.period_to + timedelta(days=1)
@@ -435,7 +580,7 @@ class CleanupCalculator:
                             # This block is now only entered if security.stock is guaranteed to be non-empty (due to the check above)
                             # OR if no payments needed update in the first place.
                             if payments_needing_qty_update and security.stock: # security.stock check is technically redundant here but safe
-                                reconciler = PositionReconciler(list(security.stock), identifier=f"{pos_id}-payment-qty-reconcile")
+                                reconciler = PositionReconciler(full_stock_history, identifier=f"{pos_id}-payment-qty-reconcile")
                                 for payment_event in security.payment:
                                     if payment_event.quantity == UNINITIALIZED_QUANTITY:
                                         date_to_use_for_reconciliation = payment_event.paymentDate
@@ -445,7 +590,10 @@ class CleanupCalculator:
                                             log_date_source = "exDate"
                                             # Removed the preliminary "Using exDate..." log as requested.
                                             # The information will be in the success or error message.
-                                        reconciled_quantity_info = reconciler.synthesize_position_at_date(date_to_use_for_reconciliation)
+                                        reconciled_quantity_info = reconciler.synthesize_position_at_date(
+                                            date_to_use_for_reconciliation,
+                                            assume_zero_if_no_balances=True
+                                        )
 
                                         if reconciled_quantity_info is not None and reconciled_quantity_info.quantity is not None:
                                             original_dummy_qty = payment_event.quantity
@@ -480,4 +628,4 @@ class CleanupCalculator:
             logger.info("Cleanup calculation finished. No data was modified.") # Adjusted log
         return statement
 
-    
+

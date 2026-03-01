@@ -50,9 +50,11 @@ After installing, see the [User Guide](docs/user_guide.md) for preparation steps
 
 ### Verifying an Existing Steuerauszug
 
-The tool can also be used to cross check and existing existing Steuerauszug (eCH-0196 XML). See See [verify instructions](docs/verify_existing.mdverify_existing.md).
+The tool can also be used to cross check and existing existing Steuerauszug (eCH-0196 XML). See See [verify instructions](docs/verify_existing.md).
 
+### Appending Additional Documents
 
+You can attach original broker statements or other supporting documents to the generated PDF using `--pre-amble` and `--post-amble` options. See the [User Guide](docs/user_guide.md#appending-additional-documents) for details.
 
 ## Features
 
@@ -70,7 +72,19 @@ The tool can also be used to cross check and existing existing Steuerauszug (eCH
 - **Yahoo Finance integration** - Fetch current prices for securities with tickers
 - **Workflow automation** - Combined scripts for end-to-end price management
 
-See [USAGE.md](USAGE.md) and [scripts/README.md](scripts/README.md) for details. 
+See [USAGE.md](USAGE.md) and [scripts/README.md](scripts/README.md) for details.
+
+## Sample Output
+
+Below are previews from a sample Steuerauszug generated from the [VT and Chill](tests/samples/import/ibkr/vtandchill_2025.xml) IBKR test data.
+
+| Summary page (p.1) | Stock table (p.3) |
+|---|---|
+| ![Summary page](docs/sample_summary_page.png) | ![Stock table](docs/sample_stock_table_page.png) |
+
+[📄 Download full sample PDF](docs/sample_output.pdf)
+
+[📄 Download full sample ECH-0196 XML](docs/sample_output.xml)
 
 ## Supported Brokers
 
@@ -83,13 +97,13 @@ Additionally we can recalculate and verify any existing steuerauszug (this is mo
 
 ## Related work and alternatives
 
-[Datalevel](https://www.datalevel.ch/en/) offers a very [similar solution for IBKR](https://www.datalevel.ch/en/loesungen) as a paid service (reasonable yearly flat fee). It is a SaaS solution that requires online access to the flex API for your account. They are from the SWIS banking ecosystem so they use the shared Java rendering libraries which makes things look a bit more standard. They suffer from of the same issues as well, like this project they are not actually the offical bank. If you need no hassle, this could be it.
+[Datalevel](https://www.datalevel.ch/en/) offers a very [similar solution for IBKR](https://www.datalevel.ch/en/loesungen) as a paid service (reasonable yearly flat fee). It is a SaaS solution that requires online access to the flex API for your account. They are from the Swiss banking ecosystem so they use the shared Java rendering libraries which makes things look a bit more standard. They suffer from of the same issues as well, like this project they are not actually the official bank. If you need no hassle, this could be it.
 
-[zh-tax-csv-import](https://github.com/stefanloerwald/zh-tax-csv-import) is a chrome extension also imports Schwab and Interactive Broker statements, but then fills in directly on the tax forms. This is less clean and more brittle, but once done the Tax office sees no difference to manual entry. As an upside the tax declaration remains an authorative list of all your investments and accounts. 
+[zh-tax-csv-import](https://github.com/stefanloerwald/zh-tax-csv-import) is a chrome extension also imports Schwab and Interactive Broker statements, but then fills in directly on the tax forms. This is less clean and more brittle, but once done the Tax office sees no difference to manual entry. As an upside the tax declaration remains an authoritative list of all your investments and accounts. 
 
 Agentic browsers are getting very close just be able to do the above all by themselves.
 
-The [EWV](https://www.ewv-ete.ch/de/ewv-ete/) and SSK publish a [shared set of tools](https://forum.mustachianpost.com/t/programmatic-tax-return/11908/69) that is even referenced in the spec. This used to availabe online, but is now locked down to a cabal of banks and tax officials. Inquiring minds however have noticed that the JAR is [included in nearly every offline official Tax software](https://mkiesel.ch/posts/swiss-tax-adventures-1/). It includes an official sample renderer for the PDF version given an XML file, so you could also use that instead of the python renderer. It will look a bit more official. I wasn't aware this existed and had to recontruct from scratch as well as fix a lot of the python PDF417 libraries. The spec refers to the library as open source but non of these actually include the source.
+The [EWV](https://www.ewv-ete.ch/de/ewv-ete/) and SSK publish a [shared set of tools](https://forum.mustachianpost.com/t/programmatic-tax-return/11908/69) that is even referenced in the spec. This used to available online, but is now locked down to a cabal of banks and tax officials. Inquiring minds however have noticed that the JAR is [included in nearly every offline official Tax software](https://mkiesel.ch/posts/swiss-tax-adventures-1/). It includes an official sample renderer for the PDF version given an XML file, so you could also use that instead of the python renderer. It will look a bit more official. I wasn't aware this existed and had to reconstruct from scratch as well as fix a lot of the python PDF417 libraries. The spec refers to the library as open source but non of these actually include the source.
 
 ## Installation
 
