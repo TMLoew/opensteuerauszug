@@ -526,7 +526,7 @@ class IbkrImporter:
                         mutation=True,
                         quantity=quantity,
                         unitPrice=trade_price if trade_price != Decimal(0) else None,
-                        name=buy_sell.value,
+                        name=buy_sell.value if hasattr(buy_sell, 'value') else str(buy_sell),
                         orderId=trade.ibOrderID,
                         balanceCurrency=currency,
                         quotationType="PIECE"
@@ -661,7 +661,7 @@ class IbkrImporter:
                     )
 
                     direction = transfer.direction
-                    direction_val = direction.value.upper() if direction else None
+                    direction_val = (direction.value if hasattr(direction, 'value') else str(direction)).upper() if direction else None
                     is_cancel = ibflex.Code.CANCEL in (transfer.code or ())
                     if direction_val == 'OUT' and quantity > 0 and not is_cancel:
                         raise ValueError(
@@ -681,7 +681,7 @@ class IbkrImporter:
                     transfer_type = self._get_required_field(
                         transfer, 'type', 'Transfer'
                     )
-                    transfer_type_val = transfer_type.value
+                    transfer_type_val = transfer_type.value if hasattr(transfer_type, 'value') else str(transfer_type)
                     account = self._get_required_field(transfer, 'account', 'Transfer')
 
                     sec_pos = SecurityPosition(
@@ -836,7 +836,7 @@ class IbkrImporter:
                         raise ValueError(f"CashTransaction type is missing for {description}")
 
                     if security_id:
-                        tx_type_str = tx_type.value
+                        tx_type_str = tx_type.value if hasattr(tx_type, 'value') else str(tx_type)
                         tx_type_str_lower = str(tx_type_str).lower()
                         assert 'interest' not in tx_type_str_lower
 
@@ -1000,16 +1000,11 @@ class IbkrImporter:
 
             # Log negative balances (short positions)
             if opening_balance < 0 or closing_balance < 0:
-                if asset_cat == "OPT" and sub_category == "C":
-                    logger.warning(
-                        f"Negative balance computed for security {sec_pos_obj.symbol} with OPT/C. In case you expect short positions, this is fine. Otherwise, please report this to the developers for further investigation."
-                        f" (start {opening_balance}, end {closing_balance})"
-                    )
-                else:
-                    raise ValueError(
-                        f"Negative balance computed for security {sec_pos_obj.symbol}. In case you expect short positions, please report this to the developers for further investigation."
-                        f" (start {opening_balance}, end {closing_balance})"
-                    )
+                logger.warning(
+                    f"Negative balance computed for security {sec_pos_obj.symbol}"
+                    f" (start {opening_balance}, end {closing_balance})."
+                    f" This may indicate a short position or incomplete history in the flex report."
+                )
 
             # Check if this is a rights issue and if we should skip it
             is_rights_issue = sec_pos_obj in rights_issue_positions

@@ -6,13 +6,15 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, List, Optional
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QDate, QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QDateEdit,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -34,6 +36,7 @@ _DASH = "–"
 @dataclass
 class PerformanceRecord:
     name: str
+    symbol: str
     isin: str
     native_currency: str
 
@@ -44,6 +47,7 @@ class PerformanceRecord:
     buys_native: Decimal = field(default=_ZERO)
     sells_native: Decimal = field(default=_ZERO)
     dividends_native: Decimal = field(default=_ZERO)
+    dividends_chf: Decimal = field(default=_ZERO)
     unrealized_pl_native: Decimal = field(default=_ZERO)
     realized_pl_native: Decimal = field(default=_ZERO)
     total_pl_native: Decimal = field(default=_ZERO)
@@ -69,10 +73,15 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
     if list_of_securities is None:
         return records
 
-    securities = getattr(list_of_securities, "security", None) or []
+    securities = [
+        sec
+        for depot in (getattr(list_of_securities, "depot", None) or [])
+        for sec in (getattr(depot, "security", None) or [])
+    ]
 
     for sec in securities:
-        isin = str(getattr(sec, "isin", None) or getattr(sec, "valorNumber", None) or getattr(sec, "symbol", "") or "")
+        symbol = str(getattr(sec, "symbol", None) or "")
+        isin = str(getattr(sec, "isin", None) or getattr(sec, "valorNumber", None) or symbol or "")
         ccy = str(getattr(sec, "currency", "?"))
         name = str(getattr(sec, "securityName", isin))
 
@@ -143,6 +152,7 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
         else:
             fx_close = Decimal("1")
         total_pl_chf = total_pl_native / fx_close if fx_close else _ZERO
+        dividends_chf = dividends_native / fx_close if fx_close else _ZERO
 
         # --- Unrealized / Realized split (average-cost approximation) ---
         net_invested = opening_native + buys_native - sells_native
@@ -165,6 +175,7 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
 
         records.append(PerformanceRecord(
             name=name,
+            symbol=symbol,
             isin=isin,
             native_currency=ccy,
             opening_value_native=opening_native,
@@ -174,6 +185,7 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
             buys_native=buys_native,
             sells_native=sells_native,
             dividends_native=dividends_native,
+            dividends_chf=dividends_chf,
             unrealized_pl_native=unrealized_pl_native,
             realized_pl_native=realized_pl_native,
             total_pl_native=total_pl_native,
@@ -195,16 +207,17 @@ class PerformanceWorker(QThread):
     finished = Signal(list)          # list[PerformanceRecord]
     error = Signal(str)
 
-    def __init__(self, input_path: str, broker: str, tax_year: int) -> None:
+    def __init__(self, input_path: str, broker: str, period_from: date, period_to: date) -> None:
         super().__init__()
         self._input_path = input_path
         self._broker = broker
-        self._tax_year = tax_year
+        self._period_from = period_from
+        self._period_to = period_to
 
     def run(self) -> None:
         try:
-            period_from = date(self._tax_year, 1, 1)
-            period_to = date(self._tax_year, 12, 31)
+            period_from = self._period_from
+            period_to = self._period_to
 
             if self._broker == "ibkr":
                 from opensteuerauszug.importers.ibkr.ibkr_importer import IbkrImporter
@@ -230,6 +243,7 @@ class PerformanceWorker(QThread):
 
 _COLUMNS = [
     ("Name", "name"),
+    ("Symbol", "symbol"),
     ("ISIN", "isin"),
     ("CCY", "native_currency"),
     ("Opening (CCY)", "opening_value_native"),
@@ -304,6 +318,36 @@ class PerformanceTab(QWidget):
         info.setObjectName("heroSubtitle")
         ctrl_layout.addWidget(info)
 
+        date_row = QHBoxLayout()
+        date_row.addWidget(QLabel("From:"))
+        self._from_edit = QDateEdit()
+        self._from_edit.setCalendarPopup(True)
+        today = QDate.currentDate()
+        self._from_edit.setDate(QDate(today.year(), 1, 1))
+        self._from_edit.setDisplayFormat("yyyy-MM-dd")
+        self._from_edit.setToolTip("Include transactions from this date")
+        date_row.addWidget(self._from_edit)
+        date_row.addSpacing(12)
+        date_row.addWidget(QLabel("To:"))
+        self._cutoff_edit = QDateEdit()
+        self._cutoff_edit.setCalendarPopup(True)
+        self._cutoff_edit.setDate(today)
+        self._cutoff_edit.setDisplayFormat("yyyy-MM-dd")
+        self._cutoff_edit.setToolTip("Include transactions up to and including this date")
+        date_row.addWidget(self._cutoff_edit)
+        date_row.addStretch()
+        ctrl_layout.addLayout(date_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Symbol filter:"))
+        self._symbol_filter = QLineEdit()
+        self._symbol_filter.setPlaceholderText("e.g. AAPL  (leave empty to show all)")
+        self._symbol_filter.setClearButtonEnabled(True)
+        self._symbol_filter.setMaximumWidth(200)
+        filter_row.addWidget(self._symbol_filter)
+        filter_row.addStretch()
+        ctrl_layout.addLayout(filter_row)
+
         btn_row = QHBoxLayout()
         self._analyze_btn = QPushButton("Analyze")
         self._analyze_btn.setDefault(True)
@@ -334,21 +378,45 @@ class PerformanceTab(QWidget):
 
         # ── Wire ─────────────────────────────────────────────────────────
         self._analyze_btn.clicked.connect(self._run_analysis)
+        self._main.tax_year_spin.valueChanged.connect(self._on_tax_year_changed)
+        self._symbol_filter.textChanged.connect(self._apply_filter)
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
+    def _on_tax_year_changed(self, year: int) -> None:
+        today = date.today()
+        self._from_edit.setDate(QDate(year, 1, 1))
+        if year == today.year:
+            self._cutoff_edit.setDate(QDate(today.year, today.month, today.day))
+        else:
+            self._cutoff_edit.setDate(QDate(year, 12, 31))
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().upper()
+        # Symbol column is index 1
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 1)
+            match = (not needle) or (item is not None and needle == item.text().upper())
+            self._table.setRowHidden(row, not match)
+
     def _run_analysis(self) -> None:
         input_path: str = self._main.input_path_edit.text().strip()
         broker: str = self._main.importer_combo.currentData()
-        tax_year: int = self._main.tax_year_spin.value()
+        qf = self._from_edit.date()
+        period_from = date(qf.year(), qf.month(), qf.day())
+        qd = self._cutoff_edit.date()
+        period_to = date(qd.year(), qd.month(), qd.day())
 
         if not input_path:
             self._set_status("No input file selected in the Generator tab.", error=True)
             return
         if broker == "none":
             self._set_status("Select a broker in the Generator tab first.", error=True)
+            return
+        if period_to < period_from:
+            self._set_status("'To' date must be on or after 'From' date.", error=True)
             return
 
         if self._worker and self._worker.isRunning():
@@ -357,9 +425,9 @@ class PerformanceTab(QWidget):
         self._table.setRowCount(0)
         self._summary_label.setText("")
         self._analyze_btn.setEnabled(False)
-        self._set_status(f"Importing {tax_year} data…")
+        self._set_status(f"Importing data {period_from} – {period_to}…")
 
-        self._worker = PerformanceWorker(input_path, broker, tax_year)
+        self._worker = PerformanceWorker(input_path, broker, period_from, period_to)
         self._worker.finished.connect(self._on_results)
         self._worker.error.connect(self._on_error)
         self._worker.start()
@@ -396,6 +464,7 @@ class PerformanceTab(QWidget):
         for row, rec in enumerate(records):
             col_values = [
                 rec.name,
+                rec.symbol,
                 rec.isin,
                 rec.native_currency,
                 rec.opening_value_native,
@@ -413,7 +482,7 @@ class PerformanceTab(QWidget):
             for col, (header, _attr) in enumerate(_COLUMNS):
                 raw = col_values[col]
                 is_pct = header == "Return %"
-                is_text = col < 3  # name, isin, ccy are plain strings
+                is_text = col < 4  # name, symbol, isin, ccy are plain strings
 
                 if is_text:
                     item = QTableWidgetItem(str(raw) if raw is not None else _DASH)
@@ -432,12 +501,12 @@ class PerformanceTab(QWidget):
                 self._table.setItem(row, col, item)
 
             total_pl_chf += rec.total_pl_chf
-            total_dividends_chf += rec.dividends_native  # approximate in native; good enough for summary
+            total_dividends_chf += rec.dividends_chf
 
         self._table.setSortingEnabled(True)
 
         sign = "+" if total_pl_chf >= _ZERO else ""
         self._summary_label.setText(
             f"Total P&L (CHF): {sign}{total_pl_chf:,.2f}   |   "
-            f"Total Dividends (native Σ): {total_dividends_chf:,.2f}"
+            f"Total Dividends (CHF): {total_dividends_chf:,.2f}"
         )
