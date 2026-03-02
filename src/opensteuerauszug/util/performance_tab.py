@@ -73,6 +73,9 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
     if list_of_securities is None:
         return records
 
+    period_from = getattr(statement, "periodFrom", None)
+    period_to = getattr(statement, "periodTo", None)
+
     securities = [
         sec
         for depot in (getattr(list_of_securities, "depot", None) or [])
@@ -113,11 +116,16 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
             closing_chf = Decimal(str(getattr(tax_value, "value", 0) or 0))
             closing_qty = qty
 
-        # --- Buys and sells (mutation=True transactions) ---
+        # --- Buys and sells (mutation=True transactions within period) ---
         buys_native = _ZERO
         sells_native = _ZERO
         for s in stocks:
             if not getattr(s, "mutation", False):
+                continue
+            ref = getattr(s, "referenceDate", None)
+            if period_from and ref and ref < period_from:
+                continue
+            if period_to and ref and ref > period_to:
                 continue
             qty = Decimal(str(getattr(s, "quantity", 0) or 0))
             price = Decimal(str(getattr(s, "unitPrice", 0) or 0))
@@ -127,9 +135,14 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
             else:
                 sells_native += notional
 
-        # --- Dividends (sum of payment amounts in native currency) ---
+        # --- Dividends (sum of payment amounts in native currency within period) ---
         dividends_native = _ZERO
         for p in payments:
+            pay_date = getattr(p, "paymentDate", None)
+            if period_from and pay_date and pay_date < period_from:
+                continue
+            if period_to and pay_date and pay_date > period_to:
+                continue
             amount = getattr(p, "amount", None)
             if amount is not None:
                 # payment.amount is typically in amountCurrency (native)
