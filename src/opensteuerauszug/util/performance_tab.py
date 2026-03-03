@@ -1,6 +1,7 @@
 """Performance allocation tab: per-instrument gain/loss analysis."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -84,9 +85,16 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
 
     for sec in securities:
         symbol = str(getattr(sec, "symbol", None) or "")
+        name = str(getattr(sec, "securityName", None) or "")
+        # ECH-0196 Security has no symbol field; importer encodes it as "NAME (SYM)"
+        if not symbol and name:
+            m = re.search(r'\(([A-Z0-9.]+)\)$', name)
+            if m:
+                symbol = m.group(1)
         isin = str(getattr(sec, "isin", None) or getattr(sec, "valorNumber", None) or symbol or "")
+        if not name:
+            name = isin
         ccy = str(getattr(sec, "currency", "?"))
-        name = str(getattr(sec, "securityName", isin))
 
         stocks = list(getattr(sec, "stock", []) or [])
         payments = list(getattr(sec, "payment", []) or [])
