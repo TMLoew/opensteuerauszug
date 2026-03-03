@@ -110,7 +110,7 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
             qty = Decimal(str(getattr(b, "quantity", 0) or 0))
             price = Decimal(str(getattr(b, "unitPrice", 0) or 0))
             opening_native = qty * price
-            opening_chf = opening_native / _fx(b)
+            opening_chf = opening_native * _fx(b)
             opening_qty = qty
 
         # --- Closing value (from SecurityTaxValue) ---
@@ -165,15 +165,47 @@ def compute_performance_records(statement: "TaxStatement") -> List[PerformanceRe
         # --- Total P&L ---
         total_pl_native = closing_native + sells_native + dividends_native - opening_native - buys_native
 
-        # Derive CHF P&L using closing exchange rate if available, else opening
+        # Derive CHF P&L.  Preference order for FX rate:
+        # 1. taxValue (has the official year-end rate)
+        # 2. Sell-side weighted average from mutation entries (now stored on each SecurityStock)
+        # 3. Buy-side weighted average
+        # 4. Fallback 1:1
         if tax_value is not None:
             fx_close = _fx(tax_value)
-        elif balance_entries:
-            fx_close = _fx(balance_entries[0])
         else:
-            fx_close = Decimal("1")
-        total_pl_chf = total_pl_native / fx_close if fx_close else _ZERO
-        dividends_chf = dividends_native / fx_close if fx_close else _ZERO
+            sell_notional = _ZERO
+            sell_notional_chf = _ZERO
+            buy_notional = _ZERO
+            buy_notional_chf = _ZERO
+            for s in stocks:
+                if not getattr(s, "mutation", False):
+                    continue
+                fx_s = _fx(s)
+                if fx_s == Decimal("1"):
+                    continue  # no FX stored, skip
+                ref = getattr(s, "referenceDate", None)
+                if period_from and ref and ref < period_from:
+                    continue
+                if period_to and ref and ref > period_to:
+                    continue
+                qty_s = abs(Decimal(str(getattr(s, "quantity", 0) or 0)))
+                price_s = Decimal(str(getattr(s, "unitPrice", 0) or 0))
+                notional_s = qty_s * price_s
+                q = Decimal(str(getattr(s, "quantity", 0) or 0))
+                if q < _ZERO:
+                    sell_notional += notional_s
+                    sell_notional_chf += notional_s * fx_s
+                else:
+                    buy_notional += notional_s
+                    buy_notional_chf += notional_s * fx_s
+            if sell_notional > _ZERO:
+                fx_close = sell_notional_chf / sell_notional
+            elif buy_notional > _ZERO:
+                fx_close = buy_notional_chf / buy_notional
+            else:
+                fx_close = Decimal("1")
+        total_pl_chf = total_pl_native * fx_close if fx_close else _ZERO
+        dividends_chf = dividends_native * fx_close if fx_close else _ZERO
 
         # --- Unrealized / Realized split (average-cost approximation) ---
         net_invested = opening_native + buys_native - sells_native

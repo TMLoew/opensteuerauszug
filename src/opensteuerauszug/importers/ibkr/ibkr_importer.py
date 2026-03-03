@@ -185,7 +185,10 @@ class IbkrImporter:
                     total_quantity = pending.quantity + stock.quantity
                     if pending.unitPrice != stock.unitPrice:
                         pending.unitPrice = (pending.quantity * pending.unitPrice + stock.quantity * stock.unitPrice) / total_quantity
-
+                    if pending.exchangeRate != stock.exchangeRate and stock.exchangeRate is not None:
+                        prev_qty = total_quantity - stock.quantity
+                        prev_fx = pending.exchangeRate or stock.exchangeRate
+                        pending.exchangeRate = (prev_qty * prev_fx + stock.quantity * stock.exchangeRate) / total_quantity
                     pending.quantity = total_quantity
                 else:
                     if pending:
@@ -199,6 +202,7 @@ class IbkrImporter:
                         orderId=stock.orderId,
                         balanceCurrency=stock.balanceCurrency,
                         quotationType=stock.quotationType,
+                        exchangeRate=stock.exchangeRate,
                     )
             else:
                 if pending:
@@ -521,6 +525,7 @@ class IbkrImporter:
                         "Trade",
                     )
 
+                    fx_rate = getattr(trade, 'fxRateToBase', None)
                     stock_mutation = SecurityStock(
                         referenceDate=trade_date,
                         mutation=True,
@@ -529,7 +534,8 @@ class IbkrImporter:
                         name=buy_sell.value if hasattr(buy_sell, 'value') else str(buy_sell),
                         orderId=trade.ibOrderID,
                         balanceCurrency=currency,
-                        quotationType="PIECE"
+                        quotationType="PIECE",
+                        exchangeRate=Decimal(str(fx_rate)) if fx_rate is not None else None,
                     )
                     processed_security_positions[sec_pos]['stocks'].append(
                         stock_mutation
