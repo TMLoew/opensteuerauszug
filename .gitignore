@@ -4,7 +4,7 @@
 
 # PDF output files (contain personal tax data)
 /*.pdf
-/out/*.pdf
+**/*.pdf
 
 # XML files (contain personal financial data)
 /out/*.xml
