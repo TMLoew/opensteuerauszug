@@ -23,6 +23,13 @@ from reportlab.pdfgen import canvas
 from .data import TaxOverviewData
 from .design import PALETTE
 from .html import format_chf, format_pct_signed
+from .pdf_charts import (
+    draw_benchmark_bar,
+    draw_pie,
+    draw_position_table,
+    draw_top_positions_bar,
+    has_charts,
+)
 from .waterfall import DEFAULT_RECONCILIATION_TOLERANCE_CHF
 
 
@@ -62,6 +69,11 @@ def render_pdf_cover(data: TaxOverviewData) -> bytes:
     _draw_footer(c, width, data)
 
     c.showPage()
+    # Second page: performance charts, only when the pipeline attached a
+    # Performance section with actual data to plot.
+    if data.performance is not None and has_charts(data.performance):
+        _draw_performance_page(c, width, height, data)
+        c.showPage()
     c.save()
     return buffer.getvalue()
 
@@ -217,6 +229,89 @@ def _draw_ks36_summary(
     c.setFont(_FONT_OBLIQUE, 9)
     c.drawString(_MARGIN, y, summary)
     return y - 16
+
+
+def _draw_performance_page(
+    c: canvas.Canvas, width: float, height: float, data: TaxOverviewData
+) -> None:
+    """Second page: full-width benchmark chart + side-by-side pies + bar chart."""
+    perf = data.performance
+    assert perf is not None  # guarded by caller
+
+    # Page header.
+    c.setFillColor(HexColor(PALETTE["primary"]))
+    c.setFont(_FONT_BOLD, 20)
+    c.drawString(_MARGIN, height - _MARGIN - 4, f"Performance {data.tax_year}")
+    c.setFillColor(HexColor(PALETTE["ink_muted"]))
+    c.setFont(_FONT_BODY, 10)
+    c.drawString(
+        _MARGIN, height - _MARGIN - 22,
+        "P&L-Beiträge, Sektor- und Währungsallokation, Benchmark-Vergleich",
+    )
+    c.setStrokeColor(HexColor(PALETTE["rule"]))
+    c.setLineWidth(0.5)
+    c.line(_MARGIN, height - _MARGIN - 32, width - _MARGIN, height - _MARGIN - 32)
+
+    # Page geometry — two rows of charts above a position table.
+    usable_w = width - 2 * _MARGIN
+    gap = 12
+    top_y = height - _MARGIN - 44
+
+    # Row 1: benchmark chart (full width).
+    bench_h = 130
+    draw_benchmark_bar(
+        c,
+        x=_MARGIN, y=top_y - bench_h, width=usable_w, height=bench_h,
+        title="Portfolio vs. Benchmarks",
+        portfolio_return_pct=perf.summary.money_weighted_return_pct,
+        benchmarks=perf.benchmarks,
+    )
+
+    # Row 2: sector pie + currency pie side by side.
+    row2_y = top_y - bench_h - gap
+    pie_h = 170
+    pie_w = (usable_w - gap) / 2
+    draw_pie(
+        c,
+        x=_MARGIN, y=row2_y - pie_h, width=pie_w, height=pie_h,
+        title="Sektor-Allokation",
+        allocations=perf.sectors,
+    )
+    draw_pie(
+        c,
+        x=_MARGIN + pie_w + gap, y=row2_y - pie_h, width=pie_w, height=pie_h,
+        title="Währungs-Allokation",
+        allocations=perf.currencies,
+    )
+
+    # Row 3: top-contribution bar chart.
+    row3_y = row2_y - pie_h - gap
+    bar_h = 200
+    draw_top_positions_bar(
+        c,
+        x=_MARGIN, y=row3_y - bar_h, width=usable_w, height=bar_h,
+        title="Top-Beiträge zum Ergebnis",
+        positions=perf.positions,
+    )
+
+    # Row 4: compact position table, up to the footer.
+    row4_y = row3_y - bar_h - gap
+    table_h = max(row4_y - _MARGIN - 24, 0)
+    if table_h > 40 and perf.positions:
+        draw_position_table(
+            c,
+            x=_MARGIN, y=row4_y - table_h, width=usable_w, height=table_h,
+            title="Positionen im Detail",
+            positions=perf.positions,
+        )
+
+    # Footer for the charts page.
+    c.setFillColor(HexColor(PALETTE["ink_muted"]))
+    c.setFont(_FONT_BODY, 8)
+    c.drawString(
+        _MARGIN, _MARGIN / 2,
+        f"Performance-Bericht  ·  Steuerjahr {data.tax_year}  ·  Broker {data.broker}",
+    )
 
 
 def _draw_footer(c: canvas.Canvas, width: float, data: TaxOverviewData) -> None:
