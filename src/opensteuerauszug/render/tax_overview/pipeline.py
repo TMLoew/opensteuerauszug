@@ -367,14 +367,34 @@ def _find_closing_stock(stocks: Sequence[SecurityStock], *, period_end: date) ->
 
 
 def _find_opening_stock(stocks: Sequence[SecurityStock], *, period_start: date) -> Optional[SecurityStock]:
-    """Return the opening balance stock entry (mutation=False at period start)."""
-    candidates = [s for s in stocks if not s.mutation and s.referenceDate <= period_start]
-    if not candidates:
-        # Some importers label the opening with referenceDate = period_start exactly.
-        candidates = [s for s in stocks if not s.mutation]
-    if not candidates:
+    """Return the opening balance stock entry (mutation=False at period start).
+
+    The IBKR importer writes a ``mutation=False`` entry with
+    ``referenceDate == period_start`` for securities that had a non-zero
+    position at the start of the tax year. Closing balances live at
+    ``period_start + 365 days`` (i.e. start-of-next-day after period_to), so
+    strict date matching is required — otherwise we'd return the closing
+    entry as the opening.
+    """
+    for s in stocks:
+        if not s.mutation and s.referenceDate == period_start:
+            return s
+    return None
+
+
+def _earliest_mutation_price(stocks: Sequence[SecurityStock]) -> Optional[Decimal]:
+    """First observed non-None unitPrice across mutation entries."""
+    priced = [s for s in stocks if s.mutation and s.unitPrice is not None]
+    if not priced:
         return None
-    return min(candidates, key=lambda s: s.referenceDate)
+    return min(priced, key=lambda s: s.referenceDate).unitPrice
+
+
+def _earliest_mutation_rate(stocks: Sequence[SecurityStock]) -> Optional[Decimal]:
+    priced = [s for s in stocks if s.mutation and s.exchangeRate is not None]
+    if not priced:
+        return None
+    return min(priced, key=lambda s: s.referenceDate).exchangeRate
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +709,17 @@ def _collect_fx_rates(statement: TaxStatement) -> List[FXRateUsed]:
 
 
 def _sum_security_opening(statement: TaxStatement, *, period_start: date) -> Decimal:
+    """Sum opening-day portfolio value in CHF.
+
+    Three tiers:
+      1. ``opening.value`` filled directly (happens when a prior-year
+         Kursliste is available and the calculator priced the entry).
+      2. ``opening.balance × opening.exchangeRate`` when both are present.
+      3. ``opening.quantity × price × fx`` — price and fx come from the
+         earliest intra-year trade on the same security (best available
+         proxy for the 01.01 price when no prior-year Kursliste is loaded),
+         falling back to the year-end ``taxValue`` figures.
+    """
     total = ZERO
     los = statement.listOfSecurities
     if not los:
@@ -700,8 +731,28 @@ def _sum_security_opening(statement: TaxStatement, *, period_start: date) -> Dec
                 continue
             if opening.value is not None:
                 total += opening.value
-            elif opening.balance is not None and opening.exchangeRate is not None:
+                continue
+            if opening.balance is not None and opening.exchangeRate is not None:
                 total += opening.balance * opening.exchangeRate
+                continue
+
+            quantity = opening.quantity or ZERO
+            if not quantity:
+                continue
+
+            price = _earliest_mutation_price(security.stock)
+            if price is None and security.taxValue:
+                price = security.taxValue.unitPrice
+            if price is None:
+                continue
+
+            rate = _earliest_mutation_rate(security.stock)
+            if rate is None and security.taxValue:
+                rate = security.taxValue.exchangeRate
+            if rate is None:
+                rate = Decimal("1")
+
+            total += (quantity * price * rate).quantize(Decimal("0.01"))
     return total
 
 
@@ -710,9 +761,39 @@ def _sum_security_closing(positions: Iterable[PositionSummary]) -> Decimal:
 
 
 def _sum_bank_opening(statement: TaxStatement, *, period_start: date) -> Decimal:
-    # Bank account openings are not separately modeled in the eCH-0196 shape we
-    # hold; treat opening cash as zero-delta (the residual absorbs it). This is
-    # a documented limitation of the dashboard.
+    """Approximate opening cash per bank account.
+
+    Lynx / IBKR flex exports contain ``endingCash`` but no ``startingCash``
+    by default. The eCH-0196 BankAccountPayment captures interest and fees
+    but not trade settlements, deposits, or withdrawals — so we cannot
+    reverse flows precisely. As a best-effort estimate we subtract the
+    period's tracked payments from the closing balance; the residual in
+    the waterfall absorbs the remaining error.
+    """
+    total = ZERO
+    loba = statement.listOfBankAccounts
+    if not loba:
+        return total
+    for ba in loba.bankAccount:
+        if not ba.taxValue:
+            continue
+        closing_chf = _bank_closing_chf(ba)
+        payments_chf = ZERO
+        for payment in ba.payment:
+            gross = _sum_optional(payment.grossRevenueA, payment.grossRevenueB)
+            if gross == 0 and payment.amount is not None:
+                rate = payment.exchangeRate or Decimal("1")
+                gross = (payment.amount * rate).quantize(Decimal("0.01"))
+            payments_chf += gross
+        total += closing_chf - payments_chf
+    return total
+
+
+def _bank_closing_chf(ba: BankAccount) -> Decimal:
+    if ba.taxValue and ba.taxValue.value is not None:
+        return ba.taxValue.value
+    if ba.taxValue and ba.taxValue.balance is not None and ba.taxValue.exchangeRate is not None:
+        return ba.taxValue.balance * ba.taxValue.exchangeRate
     return ZERO
 
 
@@ -722,10 +803,7 @@ def _sum_bank_closing(statement: TaxStatement, *, period_end: date) -> Decimal:
     if not loba:
         return total
     for ba in loba.bankAccount:
-        if ba.taxValue and ba.taxValue.value is not None:
-            total += ba.taxValue.value
-        elif ba.taxValue and ba.taxValue.balance is not None and ba.taxValue.exchangeRate is not None:
-            total += ba.taxValue.balance * ba.taxValue.exchangeRate
+        total += _bank_closing_chf(ba)
     return total
 
 
