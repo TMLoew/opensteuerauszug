@@ -19,6 +19,7 @@ from typing import Optional
 
 from jinja2 import Environment
 
+from .charts import render_bar, render_benchmark_comparison, render_pie
 from .data import TaxOverviewData
 from .design import css_variables
 
@@ -53,6 +54,16 @@ def format_number(value: Decimal, *, decimals: int = 2) -> str:
 def format_percent(value: Decimal) -> str:
     """Format a decimal rate (``0.15``) as ``15.0%``."""
     return format_number(value * 100, decimals=1) + "%"
+
+
+def format_pct_signed(value: Optional[Decimal]) -> str:
+    """Pre-scaled percent (``6.24`` → ``+6.24%``). Empty string for ``None``."""
+    if value is None:
+        return ""
+    quantized = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    sign = "+" if quantized > 0 else ("-" if quantized < 0 else "±")
+    int_part, _, dec_part = f"{abs(quantized):.2f}".partition(".")
+    return f"{sign}{_group_thousands(int_part)}.{dec_part}%"
 
 
 def format_date(value: Optional[date]) -> str:
@@ -159,6 +170,22 @@ tbody tr:nth-child(even) td { background: var(--color-paper-warm); }
     margin-top: calc(var(--grid-unit) * 4);
 }
 .preparer-only h2 { color: var(--color-accent); }
+.chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: calc(var(--grid-unit) * 3);
+    align-items: start;
+    margin-top: calc(var(--grid-unit) * 2);
+}
+.chart-card {
+    background: var(--color-paper-warm);
+    border: 1px solid var(--color-rule);
+    padding: calc(var(--grid-unit) * 2);
+}
+.chart-card h3 { margin-top: 0; }
+.chart-card svg { width: 100%; height: auto; display: block; }
+.benchmark-note { color: var(--color-ink-muted); font-size: 0.8125rem; margin-top: calc(var(--grid-unit) / 2); }
+.table-wrap { overflow-x: auto; margin-top: calc(var(--grid-unit) * 2); }
 </style>
 </head>
 <body>
@@ -191,6 +218,112 @@ tbody tr:nth-child(even) td { background: var(--color-paper-warm); }
 </tbody>
 </table>
 </section>
+
+{% if data.performance %}
+{% set perf = data.performance %}
+<section id="performance">
+<h2>Performance</h2>
+<div class="kpi-grid">
+<div class="kpi-tile"><div class="kpi-label">Gesamt-P&amp;L</div><div class="kpi-value {% if perf.summary.total_pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(perf.summary.total_pnl_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Rendite (Dietz)</div><div class="kpi-value {% if perf.summary.money_weighted_return_pct and perf.summary.money_weighted_return_pct >= 0 %}positive{% elif perf.summary.money_weighted_return_pct %}negative{% endif %}">{{ fmt_pct_signed(perf.summary.money_weighted_return_pct) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Rendite (einfach)</div><div class="kpi-value">{{ fmt_pct_signed(perf.summary.simple_return_pct) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Netto-Einzahlungen</div><div class="kpi-value">{{ fmt_chf(perf.summary.net_deposits_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Dividenden</div><div class="kpi-value">{{ fmt_chf(perf.summary.dividends_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Zinsen</div><div class="kpi-value">{{ fmt_chf(perf.summary.interest_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Gebühren</div><div class="kpi-value">{{ fmt_chf(perf.summary.fees_chf) }}</div></div>
+</div>
+
+<div class="chart-grid">
+{% if perf.benchmarks or perf.summary.money_weighted_return_pct is not none %}
+<div class="chart-card">
+<h3>Portfolio vs. Benchmarks</h3>
+{{ benchmark_svg|safe }}
+<p class="benchmark-note">Benchmarks sind Total-Return-Werte (kalenderjährlich). Dienen der Orientierung — keine exakte Portfolio-Replikation.</p>
+</div>
+{% endif %}
+{% if perf.sectors %}
+<div class="chart-card">
+<h3>Allokation nach Sektoren</h3>
+{{ sectors_svg|safe }}
+</div>
+{% endif %}
+{% if perf.currencies %}
+<div class="chart-card">
+<h3>Allokation nach Währungen</h3>
+{{ currencies_svg|safe }}
+</div>
+{% endif %}
+</div>
+
+{% if perf.positions %}
+<h3>Top-Beiträge zum Ergebnis</h3>
+<div class="chart-card">{{ top_positions_svg|safe }}</div>
+
+<h3>Positionen im Detail</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Symbol</th><th>ISIN</th><th>Bezeichnung</th><th>Sektor</th><th>Währung</th><th class="number">Eröffnung</th><th class="number">Schluss</th><th class="number">Käufe</th><th class="number">Verkäufe</th><th class="number">Dividenden</th><th class="number">Realisiert</th><th class="number">Unrealisiert</th><th class="number">Gesamt-P&amp;L</th><th class="number">Rendite</th></tr></thead>
+<tbody>
+{% for p in perf.positions %}
+<tr>
+<td>{{ p.symbol }}</td>
+<td>{{ p.isin or "" }}</td>
+<td>{{ p.description }}</td>
+<td>{{ p.sector }}</td>
+<td>{{ p.currency }}</td>
+<td class="number">{{ fmt_chf(p.opening_value_chf) }}</td>
+<td class="number">{{ fmt_chf(p.closing_value_chf) }}</td>
+<td class="number">{{ fmt_chf(p.buys_chf) }}</td>
+<td class="number">{{ fmt_chf(p.sells_chf) }}</td>
+<td class="number">{{ fmt_chf(p.dividends_chf) }}</td>
+<td class="number {% if p.realized_pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(p.realized_pnl_chf) }}</td>
+<td class="number {% if p.unrealized_pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(p.unrealized_pnl_chf) }}</td>
+<td class="number {% if p.total_pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(p.total_pnl_chf) }}</td>
+<td class="number {% if p.return_pct is not none and p.return_pct >= 0 %}positive{% elif p.return_pct is not none %}negative{% endif %}">{{ fmt_pct_signed(p.return_pct) }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+
+{% if perf.sectors %}
+<h3>Sektor-Aggregation</h3>
+<table>
+<thead><tr><th>Sektor</th><th class="number">Marktwert CHF</th><th class="number">Gewicht</th><th class="number">P&amp;L CHF</th></tr></thead>
+<tbody>
+{% for s in perf.sectors %}
+<tr><td>{{ s.label }}</td><td class="number">{{ fmt_chf(s.market_value_chf) }}</td><td class="number">{{ fmt_pct_signed(s.weight_pct) }}</td><td class="number {% if s.pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(s.pnl_chf) }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+
+{% if perf.currencies %}
+<h3>Währungs-Aggregation</h3>
+<table>
+<thead><tr><th>Währung</th><th class="number">Marktwert CHF</th><th class="number">Gewicht</th><th class="number">P&amp;L CHF</th></tr></thead>
+<tbody>
+{% for c in perf.currencies %}
+<tr><td>{{ c.label }}</td><td class="number">{{ fmt_chf(c.market_value_chf) }}</td><td class="number">{{ fmt_pct_signed(c.weight_pct) }}</td><td class="number {% if c.pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(c.pnl_chf) }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+
+{% if perf.benchmarks %}
+<h3>Benchmark-Referenzen</h3>
+<table>
+<thead><tr><th>Kürzel</th><th>Bezeichnung</th><th class="number">Rendite {{ data.tax_year }}</th><th>Hinweis</th></tr></thead>
+<tbody>
+{% for b in perf.benchmarks %}
+<tr><td>{{ b.code }}</td><td>{{ b.label }}</td><td class="number">{{ fmt_pct_signed(b.return_pct) }}</td><td>{{ b.note or "" }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+</section>
+{% endif %}
 
 <section id="wertschriften">
 <h2>Wertschriften</h2>
@@ -355,6 +488,7 @@ def _build_environment() -> Environment:
         fmt_chf=format_chf,
         fmt_num=format_number,
         fmt_percent=format_percent,
+        fmt_pct_signed=format_pct_signed,
         fmt_date=format_date,
     )
     return env
@@ -371,5 +505,24 @@ def render_html(data: TaxOverviewData) -> str:
     macro_module = env.from_string(_INCOME_TABLE_MACRO).module
     env.globals["income_table"] = macro_module.income_table
 
+    # Pre-render SVGs so the template just embeds them (keeps Jinja clean).
+    if data.performance:
+        perf = data.performance
+        sectors_svg = render_pie(perf.sectors)
+        currencies_svg = render_pie(perf.currencies)
+        top_positions_svg = render_bar(perf.positions)
+        benchmark_svg = render_benchmark_comparison(
+            perf.summary.money_weighted_return_pct, perf.benchmarks,
+        )
+    else:
+        sectors_svg = currencies_svg = top_positions_svg = benchmark_svg = ""
+
     template = env.from_string(_TEMPLATE_SOURCE)
-    return template.render(data=data, css_variables=css_variables())
+    return template.render(
+        data=data,
+        css_variables=css_variables(),
+        sectors_svg=sectors_svg,
+        currencies_svg=currencies_svg,
+        top_positions_svg=top_positions_svg,
+        benchmark_svg=benchmark_svg,
+    )

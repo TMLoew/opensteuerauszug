@@ -13,6 +13,7 @@ from .fx import write_fx_rates_sheet
 from .income import write_dividends_sheet, write_interest_sheet
 from .ks36 import write_ks36_criteria_sheet, write_ks36_evidence_sheet
 from .orders_sheet import write_orders_sheet
+from .performance import write_performance_sheet
 from .securities import write_securities_sheet
 from .uebersicht import write_uebersicht_sheet
 from .verzeichnis import write_verzeichnis_sheet
@@ -26,6 +27,7 @@ __all__ = [
     "write_ks36_criteria_sheet",
     "write_ks36_evidence_sheet",
     "write_orders_sheet",
+    "write_performance_sheet",
     "write_securities_sheet",
     "write_uebersicht_sheet",
     "write_verzeichnis_sheet",

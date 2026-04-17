@@ -141,6 +141,81 @@ class KS36Evidence:
 
 
 @dataclass(frozen=True)
+class PerformancePosition:
+    """One row in the Performance tab: per-security total return.
+
+    ``return_pct`` is the period P&L divided by opening value (or — when
+    opening was zero because the position was opened intra-year — by
+    net invested capital). ``contribution_chf`` is the signed CHF P&L that
+    rolls up into the portfolio total.
+    """
+
+    isin: Optional[str]
+    symbol: str
+    description: str
+    currency: str
+    sector: str
+    opening_value_chf: Decimal
+    closing_value_chf: Decimal
+    buys_chf: Decimal
+    sells_chf: Decimal
+    dividends_chf: Decimal
+    unrealized_pnl_chf: Decimal
+    realized_pnl_chf: Decimal
+    total_pnl_chf: Decimal
+    return_pct: Optional[Decimal]
+
+
+@dataclass(frozen=True)
+class SectorAllocation:
+    """Sector or currency bucket for pie-chart rendering."""
+
+    label: str
+    market_value_chf: Decimal
+    pnl_chf: Decimal
+    weight_pct: Decimal
+
+
+@dataclass(frozen=True)
+class BenchmarkComparison:
+    """One benchmark row for the performance tab (hardcoded annual return)."""
+
+    code: str            # e.g. "SPI", "SMI", "SPX", "MSCI_ACWI"
+    label: str           # display name
+    return_pct: Decimal  # annual return in percent (e.g. 6.24)
+    note: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PerformanceSummary:
+    """Top-of-tab KPIs for the whole portfolio."""
+
+    opening_value_chf: Decimal
+    closing_value_chf: Decimal
+    net_deposits_chf: Decimal
+    total_pnl_chf: Decimal
+    dividends_chf: Decimal
+    interest_chf: Decimal
+    fees_chf: Decimal
+    # Modified Dietz: P&L / (opening + weighted deposits). Weight=0.5 assumes
+    # deposits arrive mid-period; good enough at a dashboard level.
+    money_weighted_return_pct: Optional[Decimal]
+    # Simple return without flow adjustment, for cross-check.
+    simple_return_pct: Optional[Decimal]
+
+
+@dataclass(frozen=True)
+class PerformanceSection:
+    """Aggregate performance payload consumed by HTML / xlsx / PDF renderers."""
+
+    summary: PerformanceSummary
+    positions: List[PerformancePosition] = field(default_factory=list)
+    sectors: List[SectorAllocation] = field(default_factory=list)
+    currencies: List[SectorAllocation] = field(default_factory=list)
+    benchmarks: List[BenchmarkComparison] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class DA1Claim:
     """One DA-1 reclaim line for foreign withholding tax.
 
@@ -183,6 +258,7 @@ class TaxOverviewData:
     da1_claims: List[DA1Claim] = field(default_factory=list)
     ks36_criteria: List[KS36Criterion] = field(default_factory=list)
     ks36_evidence: List[KS36Evidence] = field(default_factory=list)
+    performance: Optional[PerformanceSection] = None
 
     def realized_pnl_chf(self) -> Decimal:
         """Total realized P&L across all FIFO closes (CHF).

@@ -54,6 +54,7 @@ from .data import (
     VerzeichnisLine,
 )
 from .orders import Fill, Order, reconstruct_orders
+from .performance import SectorLookup, build_performance_section
 from .waterfall import Waterfall, WaterfallLine
 
 
@@ -380,6 +381,29 @@ def _translate_statement(
         debit_interest_chf=fallback.debit_interest_chf,
     )
 
+    dividends_chf = sum((d.gross_chf for d in dividends), ZERO)
+    interest_chf = sum((i.gross_chf for i in interest_events), ZERO)
+    fees_chf = sum((f.amount_chf for f in fees), ZERO) + fallback.debit_interest_chf
+
+    sector_lookup = SectorLookup(
+        cache_path=Path("data/cache/sector_lookup.json"),
+        online=False,
+    )
+    opening_by_isin = _opening_chf_by_isin(statement, period_start=date(tax_year, 1, 1))
+    performance = build_performance_section(
+        statement,
+        tax_year=tax_year,
+        opening_value_chf=opening_chf,
+        closing_value_chf=closing_chf,
+        net_deposits_chf=fallback.cash_deposits_chf,
+        dividends_chf=dividends_chf,
+        interest_chf=interest_chf,
+        fees_chf=fees_chf,
+        positions=positions,
+        opening_by_isin=opening_by_isin,
+        sector_lookup=sector_lookup,
+    )
+
     return TaxOverviewData(
         tax_year=tax_year,
         broker=broker,
@@ -398,6 +422,7 @@ def _translate_statement(
         da1_claims=da1_claims,
         ks36_criteria=[],
         ks36_evidence=[],
+        performance=performance,
     )
 
 
@@ -836,51 +861,66 @@ def _collect_fx_rates(statement: TaxStatement) -> List[FXRateUsed]:
 # ---------------------------------------------------------------------------
 
 
-def _sum_security_opening(statement: TaxStatement, *, period_start: date) -> Decimal:
-    """Sum opening-day portfolio value in CHF.
+def _security_opening_chf(security: Security, *, period_start: date) -> Decimal:
+    """Return the opening-day CHF value for one security (same rules as the
+    aggregate).
 
-    Three tiers:
-      1. ``opening.value`` filled directly (happens when a prior-year
-         Kursliste is available and the calculator priced the entry).
-      2. ``opening.balance × opening.exchangeRate`` when both are present.
-      3. ``opening.quantity × price × fx`` — price and fx come from the
-         earliest intra-year trade on the same security (best available
-         proxy for the 01.01 price when no prior-year Kursliste is loaded),
-         falling back to the year-end ``taxValue`` figures.
+    Returns :data:`ZERO` when no opening balance exists. Split from the
+    aggregate helper so per-ISIN callers (performance tab) get the same
+    3-tier fallback without re-implementing it.
     """
+    opening = _find_opening_stock(security.stock, period_start=period_start)
+    if opening is None:
+        return ZERO
+    if opening.value is not None:
+        return opening.value
+    if opening.balance is not None and opening.exchangeRate is not None:
+        return opening.balance * opening.exchangeRate
+    quantity = opening.quantity or ZERO
+    if not quantity:
+        return ZERO
+    price = _earliest_mutation_price(security.stock)
+    if price is None and security.taxValue:
+        price = security.taxValue.unitPrice
+    if price is None:
+        return ZERO
+    rate = _earliest_mutation_rate(security.stock)
+    if rate is None and security.taxValue:
+        rate = security.taxValue.exchangeRate
+    if rate is None:
+        rate = Decimal("1")
+    return (quantity * price * rate).quantize(Decimal("0.01"))
+
+
+def _opening_chf_by_isin(
+    statement: TaxStatement, *, period_start: date,
+) -> Dict[str, Decimal]:
+    """Per-ISIN opening CHF values, for the performance tab.
+
+    Uses the same 3-tier fallback as the portfolio-wide opening sum so
+    per-position P&L reconciles with the summary Dietz numerator.
+    """
+    out: Dict[str, Decimal] = {}
+    los = statement.listOfSecurities
+    if not los:
+        return out
+    for depot in los.depot:
+        for security in depot.security:
+            if not security.isin:
+                continue
+            out[security.isin] = _security_opening_chf(security, period_start=period_start)
+    return out
+
+
+def _sum_security_opening(statement: TaxStatement, *, period_start: date) -> Decimal:
+    """Sum opening-day portfolio value in CHF (see :func:`_security_opening_chf`)."""
     total = ZERO
     los = statement.listOfSecurities
     if not los:
         return total
     for depot in los.depot:
         for security in depot.security:
-            opening = _find_opening_stock(security.stock, period_start=period_start)
-            if opening is None:
-                continue
-            if opening.value is not None:
-                total += opening.value
-                continue
-            if opening.balance is not None and opening.exchangeRate is not None:
-                total += opening.balance * opening.exchangeRate
-                continue
-
-            quantity = opening.quantity or ZERO
-            if not quantity:
-                continue
-
-            price = _earliest_mutation_price(security.stock)
-            if price is None and security.taxValue:
-                price = security.taxValue.unitPrice
-            if price is None:
-                continue
-
-            rate = _earliest_mutation_rate(security.stock)
-            if rate is None and security.taxValue:
-                rate = security.taxValue.exchangeRate
-            if rate is None:
-                rate = Decimal("1")
-
-            total += (quantity * price * rate).quantize(Decimal("0.01"))
+            total += _security_opening_chf(security, period_start=period_start)
     return total
 
 

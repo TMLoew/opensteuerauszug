@@ -22,7 +22,7 @@ from reportlab.pdfgen import canvas
 
 from .data import TaxOverviewData
 from .design import PALETTE
-from .html import format_chf
+from .html import format_chf, format_pct_signed
 from .waterfall import DEFAULT_RECONCILIATION_TOLERANCE_CHF
 
 
@@ -54,6 +54,7 @@ def render_pdf_cover(data: TaxOverviewData) -> bytes:
     cursor_y = height - _MARGIN
     cursor_y = _draw_header(c, cursor_y, width, data)
     cursor_y = _draw_kpi_grid(c, cursor_y, width, data)
+    cursor_y = _draw_performance_line(c, cursor_y, width, data)
     cursor_y = _draw_waterfall_block(c, cursor_y, width, data)
     cursor_y = _draw_reconciliation(c, cursor_y, width, data)
     if data.preparer_mode:
@@ -127,6 +128,26 @@ def _draw_kpi_grid(
 
     rows = (len(tiles) + cols - 1) // cols
     return y - rows * (tile_h + gap) - 10
+
+
+def _draw_performance_line(
+    c: canvas.Canvas, y: float, width: float, data: TaxOverviewData
+) -> float:
+    """One-line Performance KPI: total P&L in CHF + Modified-Dietz return."""
+    perf = data.performance
+    if perf is None:
+        return y
+    summary = perf.summary
+    parts = [f"Gesamt-P&L: {format_chf(summary.total_pnl_chf)}"]
+    if summary.money_weighted_return_pct is not None:
+        parts.append(f"Rendite (Dietz): {format_pct_signed(summary.money_weighted_return_pct)}")
+    if summary.simple_return_pct is not None:
+        parts.append(f"Rendite (einfach): {format_pct_signed(summary.simple_return_pct)}")
+    color = PALETTE["positive"] if summary.total_pnl_chf >= 0 else PALETTE["negative"]
+    c.setFillColor(HexColor(color))
+    c.setFont(_FONT_BOLD, 10)
+    c.drawString(_MARGIN, y, "   ·   ".join(parts))
+    return y - 16
 
 
 def _draw_waterfall_block(

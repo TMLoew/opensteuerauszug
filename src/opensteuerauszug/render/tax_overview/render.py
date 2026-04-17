@@ -22,6 +22,7 @@ from .sheets import (
     write_ks36_criteria_sheet,
     write_ks36_evidence_sheet,
     write_orders_sheet,
+    write_performance_sheet,
     write_securities_sheet,
     write_uebersicht_sheet,
     write_verzeichnis_sheet,
@@ -45,6 +46,9 @@ def render_workbook(data: TaxOverviewData) -> Workbook:
     register_named_styles(wb)
 
     write_uebersicht_sheet(wb, data)
+    # Performance tab sits right after Übersicht — the dashboard narrative goes
+    # "totals → how did we get there" before diving into raw position data.
+    write_performance_sheet(wb, data)
     write_securities_sheet(wb, data)
     # SG-specific sheets go next — the tax clerk's reading order is
     # "what's the total?" → "which SG lines?" → "DA-1?" → transactional detail.
