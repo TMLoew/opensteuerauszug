@@ -81,6 +81,9 @@ Key properties:
 - The HTML report is a single self-contained document (no external
   stylesheets or scripts) that shares the workbook's palette and Swiss
   number formatting, so the two views stay visually consistent.
+- The PDF cover is a single-page executive summary (headline KPIs,
+  Vermögenszuwachs waterfall, reconciliation marker) intended for paper
+  submission or a first-look email — the full detail lives in the xlsx.
 
 Workbook sheets (left-to-right): `Übersicht`, `Wertschriften`,
 `SG_Verzeichnis` (copy-paste into the Kanton SG Wertschriftenverzeichnis

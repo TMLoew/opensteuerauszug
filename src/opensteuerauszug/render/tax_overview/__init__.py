@@ -16,6 +16,7 @@ from .data import (
 from .fifo import FifoError, FifoResult, Lot, LotClose, apply_orders
 from .html import format_chf, format_date, format_number, format_percent, render_html
 from .orders import DEFAULT_TIME_CLUSTER_WINDOW, Fill, Order, reconstruct_orders
+from .pdf_cover import render_pdf_cover
 from .render import render_workbook
 from .waterfall import (
     DEFAULT_RECONCILIATION_TOLERANCE_CHF,
@@ -68,6 +69,7 @@ __all__ = [
     "parse_formats",
     "reconstruct_orders",
     "render_html",
+    "render_pdf_cover",
     "render_workbook",
     "sum_chf",
     "tax_overview_command",
