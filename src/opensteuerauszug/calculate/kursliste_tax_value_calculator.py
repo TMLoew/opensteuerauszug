@@ -83,6 +83,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
             self.kursliste_manager = exchange_rate_provider.kursliste_manager
         self.flag_override_provider = flag_override_provider
         self._current_kursliste_security = None
+        self._current_security_is_zero_balance_option = False
         self._missing_kursliste_entries = []
         self._stock_split_warnings: List[dict] = []
         self._previous_year_exdate_warnings = []
@@ -202,6 +203,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
 
     def _handle_Security(self, security: Security, path_prefix: str) -> None:
         self._current_kursliste_security = None
+        self._current_security_is_zero_balance_option = False
 
         if not self.kursliste_manager:
             super()._handle_Security(security, path_prefix)
@@ -210,6 +212,12 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         lookup_year = None
         if security.taxValue and security.taxValue.referenceDate:
             lookup_year = security.taxValue.referenceDate.year
+
+        if lookup_year is None and security.stock and security.stock[-1].referenceDate:
+            # Infer the year from the last stock entry for securities with no end-of-period
+            # position (e.g. fully sold during the year) so that we can still check
+            # whether the security is listed in the Kursliste and emit a warning if not.
+            lookup_year = security.stock[-1].referenceDate.year
 
         if lookup_year is None:
             super()._handle_Security(security, path_prefix)
@@ -241,13 +249,14 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                 self._set_field_value(security, "valorNumber", valor_int, path_prefix)
         else:
             ident = (
-                security.isin or f"Valor {security.valorNumber}"
-                if security.valorNumber
-                else security.securityName
+                security.isin
+                or (f"Valor {security.valorNumber}" if security.valorNumber else None)
+                or security.securityName
             )
 
-            # Check if this is a rights issue that we should ignore if not found
+            # Check if this is a rights issue or zero-balance option that we should ignore if not found
             is_rights = security.is_rights_issue
+            is_option = security.securityCategory == "OPTION"
             closing_balance = Decimal("0")
 
             if security.taxValue:
@@ -261,6 +270,12 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                     "Suppressing missing Kursliste warning for rights issue %s with zero balance.",
                     ident,
                 )
+            elif is_option and closing_balance == 0:
+                logger.debug(
+                    "Suppressing missing Kursliste warning for option %s with zero balance.",
+                    ident,
+                )
+                self._current_security_is_zero_balance_option = True
             elif is_derivative:
                 logger.debug(
                     "Suppressing missing Kursliste warning for derivative %s (options/futures typically not in Kursliste).",
@@ -288,6 +303,17 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                     self._set_field_value(sec_tax_value, "balanceCurrency", "CHF", path_prefix)
                     self._set_field_value(sec_tax_value, "kursliste", True, path_prefix)
                     return
+        elif self._current_security_is_zero_balance_option:
+            # The option position was fully closed before year-end: value is definitively 0.
+            # Compute the exchange rate for the currency so the report shows a proper CHF value.
+            if sec_tax_value.balanceCurrency and sec_tax_value.referenceDate:
+                _, rate = self._convert_to_chf(
+                    None, sec_tax_value.balanceCurrency, path_prefix, sec_tax_value.referenceDate
+                )
+                self._set_field_value(sec_tax_value, "unitPrice", Decimal("0"), path_prefix)
+                self._set_field_value(sec_tax_value, "value", Decimal("0"), path_prefix)
+                self._set_field_value(sec_tax_value, "exchangeRate", rate, path_prefix)
+            return
         else:
             self._set_field_value(sec_tax_value, "undefined", True, path_prefix)
 
@@ -511,9 +537,12 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
 
         reconciler = PositionReconciler(stock, identifier=f"{security.isin or 'SEC'}-payments")
 
-        accessor = self.kursliste_manager.get_kurslisten_for_year(
+        ref_year = (
             security.taxValue.referenceDate.year
+            if security.taxValue and security.taxValue.referenceDate
+            else security.stock[-1].referenceDate.year
         )
+        accessor = self.kursliste_manager.get_kurslisten_for_year(ref_year)
 
         for pay in payments:
             if not pay.paymentDate:

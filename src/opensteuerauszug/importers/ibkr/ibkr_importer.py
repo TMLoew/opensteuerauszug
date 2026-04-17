@@ -1006,11 +1006,22 @@ class IbkrImporter:
 
             # Log negative balances (short positions)
             if opening_balance < 0 or closing_balance < 0:
-                logger.warning(
-                    f"Negative balance computed for security {sec_pos_obj.symbol}"
-                    f" (start {opening_balance}, end {closing_balance})."
-                    f" This may indicate a short position or incomplete history in the flex report."
-                )
+                if asset_cat == "OPT" and sub_category == "C":
+                    logger.warning(
+                        f"Negative balance computed for security {sec_pos_obj.symbol} with OPT/C. In case you expect short positions, this is fine. Otherwise, please report this to the developers for further investigation."
+                        f" (start {opening_balance}, end {closing_balance})"
+                    )
+                else:
+                    # FORK-DEVIATION: upstream raises here; fork warns instead so the
+                    # import keeps running on malformed broker data (e.g. flex reports
+                    # with missing accountId entries that leave position accounting
+                    # unbalanced). See test_ibkr_import_keeps_entries_with_missing_account_id.
+                    # Do not promote this to upstream without the upstream maintainer's input.
+                    logger.warning(
+                        f"Negative balance computed for security {sec_pos_obj.symbol} with {asset_cat}/{sub_category}. "
+                        f"This may indicate a short position or incomplete history in the flex report. "
+                        f"(start {opening_balance}, end {closing_balance})"
+                    )
 
             # Check if this is a rights issue and if we should skip it
             is_rights_issue = sec_pos_obj in rights_issue_positions
