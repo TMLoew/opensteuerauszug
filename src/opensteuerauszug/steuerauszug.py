@@ -95,6 +95,13 @@ class LogLevel(str, Enum):
 
 default_phases = [Phase.IMPORT, Phase.VALIDATE, Phase.CALCULATE, Phase.RECONCILE_PAYMENTS, Phase.RENDER]
 
+
+# Register the tax-overview subcommand (defined in its own module to keep the
+# tax_overview package self-contained and testable in isolation).
+from .render.tax_overview import tax_overview_command  # noqa: E402
+app.command(name="tax-overview")(tax_overview_command)
+
+
 @app.command(name="info")
 def show_info():
     """
