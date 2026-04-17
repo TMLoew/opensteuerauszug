@@ -3,6 +3,26 @@
 A Python package for generating Swiss tax statements (Steuerauszüge) from the statements of brokers that don't support it, e.g. mostly foreign ones.
 The goal is to eliminate tedious and error-prone manual typing into the tax software.
 
+## About this fork
+
+This is Tristan's fork ([TMLoew/opensteuerauszug](https://github.com/TMLoew/opensteuerauszug)) of [vroonhof/opensteuerauszug](https://github.com/vroonhof/opensteuerauszug). The fork focuses on **Kanton St. Gallen** filings and adds a human-readable dashboard alongside the standard tax-software-importable output. Core licensing and pipeline stay aligned with upstream.
+
+**Upstream provides (unchanged here):**
+- Broker import for Interactive Brokers and Charles Schwab
+- eCH-0196 XML generation and PDF rendering with PDF417 barcode
+- Manual price management (year-specific CSV files) and the Kursliste integration
+- Desktop GUI (`opensteuerauszug-gui`) and cross-verification of existing Steuerauszüge
+
+**This fork adds:**
+- A new CLI subcommand `steuerauszug tax-overview` that emits three artifacts per run: an xlsx workbook, a self-contained HTML dashboard, and a one-page PDF cover (see [docs/tax_overview.md](docs/tax_overview.md))
+- A **Kanton SG Wertschriftenverzeichnis** mapping sheet with columns ready to paste into the canton's form
+- A **DA-1 Hilfstabelle** for foreign withholding-tax reclaim with treaty-rate ceilings applied
+- A **Vermögenszuwachs waterfall** that reconciles opening + inflows − outflows = closing value within ±CHF 1 against the ESTV Kursliste Steuerwert
+- A preparer-only **ESTV Kreisschreiben Nr. 36** (gewerbsmässiger Wertschriftenhandel) self-check, gated behind `--preparer-mode` so non-preparer exports are safe to hand to a tax clerk
+- A committed synthetic [sample HTML dashboard](docs/samples/tax_overview/sample_dashboard.html) regenerable via `scripts/generate_tax_overview_samples.py`
+
+Bug reports for the tax-overview mode or SG-specific behaviour belong in this fork. Issues with the core eCH-0196 pipeline should go upstream.
+
 ## Disclaimer
 
 - The package is not formally audited
@@ -151,14 +171,17 @@ The [EWV](https://www.ewv-ete.ch/de/ewv-ete/) and SSK publish a [shared set of t
 
 Requires **Python 3.10** or newer.
 
-This needs newer version of pdf417gen and (for testing) pdf417decoder than
-available on PyPY for now there are my vendored branches
+This needs newer versions of pdf417gen and (for testing) pdf417decoder than
+are available on PyPI — these are pulled in from vroonhof's vendored git branches
+automatically. The fork's tax-overview mode additionally pulls in `openpyxl`
+(xlsx workbook export) and `jinja2` (HTML dashboard rendering); both are
+declared in `pyproject.toml` so regular `pip install` picks them up.
 
 In the current development phase it is best to install direct from git. e.g.
 
 ```console
-# Clone the repository
-git clone https://github.com/vroonhof/opensteuerauszug.git
+# Clone this fork
+git clone https://github.com/TMLoew/opensteuerauszug.git
 
 # Navigate into the cloned directory
 cd opensteuerauszug
