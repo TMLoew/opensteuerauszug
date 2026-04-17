@@ -98,9 +98,121 @@ def build_tax_overview_data(
         config_file=config_file,
         identifiers_csv=identifiers_csv,
     )
-    data = _translate_statement(statement, broker=broker, tax_year=tax_year,
-                                preparer_mode=preparer_mode)
+    broker_fallback = (
+        _extract_ibkr_flex_fallback(input_path) if broker == "ibkr" else BrokerFallback.empty()
+    )
+    data = _translate_statement(
+        statement, broker=broker, tax_year=tax_year,
+        preparer_mode=preparer_mode, fallback=broker_fallback,
+    )
     return PipelineResult(data=data, statement=statement)
+
+
+@dataclass(frozen=True)
+class BrokerFallback:
+    """Raw-Flex fallback values the TaxStatement doesn't carry.
+
+    Used to fill gaps the Kursliste can't cover: year-end prices for
+    untracked ISINs, starting/ending cash, and cash deposits/withdrawals
+    the eCH-0196 bank-payment model drops.
+    """
+
+    # ISIN → (positionValue in local currency, currency)
+    open_position_value: Dict[str, Tuple[Decimal, str]]
+    # currency → CHF rate at 31.12
+    year_end_fx: Dict[str, Decimal]
+    # CHF total of Deposits/Withdrawals CashTransactions during the period
+    cash_deposits_chf: Decimal
+    # CHF total of debit-side Broker Interest Paid (margin interest) — treated as fees
+    debit_interest_chf: Decimal
+
+    @classmethod
+    def empty(cls) -> "BrokerFallback":
+        return cls(
+            open_position_value={}, year_end_fx={},
+            cash_deposits_chf=ZERO, debit_interest_chf=ZERO,
+        )
+
+
+def _extract_ibkr_flex_fallback(flex_xml_path: Path) -> BrokerFallback:
+    """Parse the raw Flex XML for values the eCH-0196 model drops."""
+    try:
+        from lxml import etree  # type: ignore[import-untyped]
+    except ImportError:  # pragma: no cover - lxml ships with ibflex's deps
+        return BrokerFallback.empty()
+
+    if not flex_xml_path.exists():
+        return BrokerFallback.empty()
+
+    try:
+        tree = etree.parse(str(flex_xml_path))
+    except Exception as exc:  # pragma: no cover
+        logger.warning("tax-overview: could not re-parse Flex XML for fallbacks (%s)", exc)
+        return BrokerFallback.empty()
+
+    open_positions: Dict[str, Tuple[Decimal, str]] = {}
+    for op in tree.iter("OpenPosition"):
+        isin = op.get("isin") or ""
+        if not isin:
+            continue
+        try:
+            value = Decimal(op.get("positionValue") or "0")
+        except Exception:
+            continue
+        currency = op.get("currency") or ""
+        existing = open_positions.get(isin)
+        open_positions[isin] = (
+            (existing[0] + value, currency) if existing else (value, currency)
+        )
+
+    year_end_fx: Dict[str, Decimal] = {}
+    for cr in tree.iter("ConversionRate"):
+        if cr.get("reportDate") != _period_to_hint(tree) or cr.get("toCurrency") != "CHF":
+            continue
+        frm = cr.get("fromCurrency") or ""
+        if not frm:
+            continue
+        try:
+            rate = Decimal(cr.get("rate") or "0")
+        except Exception:
+            continue
+        if rate > 0:
+            year_end_fx[frm] = rate
+    year_end_fx.setdefault("CHF", Decimal("1"))
+
+    deposits = ZERO
+    debit_interest = ZERO
+    for ct in tree.iter("CashTransaction"):
+        ct_type = (ct.get("type") or "").strip()
+        currency = ct.get("currency") or ""
+        try:
+            amount = Decimal(ct.get("amount") or "0")
+        except Exception:
+            continue
+        rate = year_end_fx.get(currency, Decimal("1") if currency == "CHF" else ZERO)
+        if rate == 0:
+            continue
+        amount_chf = (amount * rate).quantize(Decimal("0.01"))
+        if ct_type == "Deposits/Withdrawals":
+            deposits += amount_chf
+        elif ct_type == "Broker Interest Paid" and amount < 0:
+            debit_interest += -amount_chf  # store as positive outflow
+
+    return BrokerFallback(
+        open_position_value=open_positions,
+        year_end_fx=year_end_fx,
+        cash_deposits_chf=deposits,
+        debit_interest_chf=debit_interest,
+    )
+
+
+def _period_to_hint(tree) -> str:  # type: ignore[no-untyped-def]
+    """Return the year-end YYYYMMDD string observed in <FlexStatement toDate=.../>."""
+    for fs in tree.iter("FlexStatement"):
+        to_date = fs.get("toDate")
+        if to_date:
+            return to_date
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +350,12 @@ def _translate_statement(
     broker: str,
     tax_year: int,
     preparer_mode: bool,
+    fallback: Optional[BrokerFallback] = None,
 ) -> TaxOverviewData:
     period_end = date(tax_year, 12, 31)
+    fallback = fallback or BrokerFallback.empty()
 
-    positions = _collect_positions(statement, period_end=period_end)
+    positions = _collect_positions(statement, period_end=period_end, fallback=fallback)
     dividends, interest, sec_fees, da1_claims = _collect_security_events(statement)
     bank_interest, bank_fees = _collect_bank_events(statement, period_end=period_end)
     fees = sec_fees + bank_fees
@@ -262,6 +376,8 @@ def _translate_statement(
         dividends=dividends,
         interest=interest_events,
         fees=fees,
+        deposits_chf=fallback.cash_deposits_chf,
+        debit_interest_chf=fallback.debit_interest_chf,
     )
 
     return TaxOverviewData(
@@ -290,7 +406,9 @@ def _translate_statement(
 # ---------------------------------------------------------------------------
 
 
-def _collect_positions(statement: TaxStatement, *, period_end: date) -> List[PositionSummary]:
+def _collect_positions(
+    statement: TaxStatement, *, period_end: date, fallback: BrokerFallback,
+) -> List[PositionSummary]:
     positions: List[PositionSummary] = []
     los = statement.listOfSecurities
     if not los:
@@ -298,7 +416,7 @@ def _collect_positions(statement: TaxStatement, *, period_end: date) -> List[Pos
 
     for depot in los.depot:
         for security in depot.security:
-            pos = _position_for(security, period_end=period_end)
+            pos = _position_for(security, period_end=period_end, fallback=fallback)
             if pos is not None:
                 positions.append(pos)
 
@@ -306,7 +424,9 @@ def _collect_positions(statement: TaxStatement, *, period_end: date) -> List[Pos
     return positions
 
 
-def _position_for(security: Security, *, period_end: date) -> Optional[PositionSummary]:
+def _position_for(
+    security: Security, *, period_end: date, fallback: BrokerFallback,
+) -> Optional[PositionSummary]:
     tv = security.taxValue
     closing_stock = _find_closing_stock(security.stock, period_end=period_end)
 
@@ -328,6 +448,14 @@ def _position_for(security: Security, *, period_end: date) -> Optional[PositionS
         tv.value if tv else None,
         closing_stock.value if closing_stock else None,
     ) or ZERO
+
+    # Kursliste gap: fall back to the broker's year-end positionValue.
+    if market_value_chf == 0 and security.isin and security.isin in fallback.open_position_value:
+        local_value, currency = fallback.open_position_value[security.isin]
+        rate = fallback.year_end_fx.get(currency or security.currency or "", Decimal("1"))
+        market_value_chf = (local_value * rate).quantize(Decimal("0.01"))
+        if price_local == 0 and quantity:
+            price_local = (local_value / quantity).quantize(Decimal("0.0001"))
 
     # Per-share CHF: balance / quantity if available, else price_local * rate.
     if market_value_chf and quantity:
@@ -880,6 +1008,8 @@ def _build_waterfall(
     dividends: Sequence[IncomeEvent],
     interest: Sequence[IncomeEvent],
     fees: Sequence[FeeEvent],
+    deposits_chf: Decimal = ZERO,
+    debit_interest_chf: Decimal = ZERO,
 ) -> Waterfall:
     total_dividends = sum((d.gross_chf for d in dividends), ZERO)
     total_interest = sum((i.gross_chf for i in interest), ZERO)
@@ -887,14 +1017,21 @@ def _build_waterfall(
     total_fees = sum((f.amount_chf for f in fees), ZERO)
 
     inflows: List[WaterfallLine] = []
+    # Deposits/Withdrawals nets to a signed number; positive = net deposit.
+    if deposits_chf > 0:
+        inflows.append(WaterfallLine("Einzahlungen", deposits_chf, "inflow"))
     if total_dividends:
         inflows.append(WaterfallLine("Dividenden brutto", total_dividends, "inflow"))
     if total_interest:
         inflows.append(WaterfallLine("Zinsen brutto", total_interest, "inflow"))
 
     outflows: List[WaterfallLine] = []
+    if deposits_chf < 0:
+        outflows.append(WaterfallLine("Auszahlungen", -deposits_chf, "outflow"))
     if total_wht:
         outflows.append(WaterfallLine("Quellensteuer", total_wht, "outflow"))
+    if debit_interest_chf:
+        outflows.append(WaterfallLine("Sollzinsen (Margin)", debit_interest_chf, "outflow"))
     if total_fees:
         outflows.append(WaterfallLine("Gebühren", total_fees, "outflow"))
 
