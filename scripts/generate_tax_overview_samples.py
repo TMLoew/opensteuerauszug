@@ -1,9 +1,14 @@
-"""Regenerate the committed tax-overview sample outputs.
+"""Generate synthetic tax-overview sample outputs for local inspection.
 
-Synthetic fixture — no personal data. Running this script writes the
-xlsx, html, and pdf samples to ``docs/samples/tax_overview/`` from one
+Synthetic fixture — no personal data, no real broker statement. Running
+this script writes the xlsx, html, and pdf samples for both taxpayer
+and preparer modes to ``docs/samples/tax_overview/`` from one
 :class:`TaxOverviewData` so all three formats describe the same
 portfolio.
+
+Outputs are **gitignored**: this script is a local preview tool, not a
+way to ship artifacts. Tax artifacts are treated as sensitive even when
+synthetic, per repo policy.
 
 Invoke from the repo root::
 
@@ -269,14 +274,6 @@ def _write_outputs(data: TaxOverviewData, label: str) -> None:
 def main() -> None:
     _write_outputs(_sample_data(preparer_mode=False), "taxpayer")
     _write_outputs(_sample_data(preparer_mode=True), "preparer")
-
-    # The taxpayer HTML is the canonical committed sample referenced by
-    # docs/tax_overview.md — keep a stable file name for the doc link.
-    canonical = SAMPLE_DIR / "sample_dashboard.html"
-    canonical.write_text(
-        (SAMPLE_DIR / "sample_dashboard_taxpayer.html").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
     print(f"Wrote samples to {SAMPLE_DIR}")
 
 

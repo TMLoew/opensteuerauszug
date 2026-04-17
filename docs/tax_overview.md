@@ -196,18 +196,23 @@ strings verbatim.
 
 ## Sample output
 
-Synthetic sample, generated from a fixture with no personal data:
+The repository ships a single synthetic sample dashboard —
+[sample_dashboard.html](samples/tax_overview/sample_dashboard.html) —
+built from a fixture with no personal data (two public securities,
+Apple Inc. and Novartis AG, at public ISINs; synthetic prices and
+quantities). Open it in any browser to see the rendered HTML.
 
-- [sample dashboard (HTML)](samples/tax_overview/sample_dashboard.html) —
-  open in any browser
-- Regenerate the xlsx and PDF locally with:
+The xlsx and PDF variants, and a preparer-mode HTML showing the KS 36
+section, are **not** committed (tax artifacts are treated as sensitive
+even when synthetic). Regenerate them locally:
 
-  ```bash
-  python scripts/generate_tax_overview_samples.py
-  ```
+```bash
+python scripts/generate_tax_overview_samples.py
+```
 
-  The script writes all three formats to `docs/samples/tax_overview/`
-  from the same `TaxOverviewData` fixture used in the tests.
+The script writes taxpayer-mode and preparer-mode variants of all three
+formats to `docs/samples/tax_overview/`; only the canonical
+`sample_dashboard.html` is tracked, everything else is gitignored.
 
 ## Troubleshooting
 

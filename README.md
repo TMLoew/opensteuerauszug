@@ -92,7 +92,7 @@ form), `DA1_Hilfstabelle` (foreign withholding-tax reclaim table),
 
 See the dedicated [Tax Overview guide](docs/tax_overview.md) for the
 full sheet-by-sheet reference, reconciliation semantics, third-party
-safety invariants, and a committed [sample HTML dashboard](docs/samples/tax_overview/sample_dashboard.html).
+safety invariants, and a committed [synthetic sample HTML dashboard](docs/samples/tax_overview/sample_dashboard.html).
 
 ### Appending Additional Documents
 

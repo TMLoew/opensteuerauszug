@@ -33,10 +33,9 @@ def sample_module(monkeypatch, tmp_path):
     sys.modules.pop("_sample_gen", None)
 
 
-def test_generator_produces_six_sample_files_plus_canonical(sample_module, tmp_path) -> None:
+def test_generator_produces_both_variants_in_all_three_formats(sample_module, tmp_path) -> None:
     sample_module.main()
     expected = {
-        "sample_dashboard.html",
         "sample_dashboard_taxpayer.html",
         "sample_dashboard_taxpayer.xlsx",
         "sample_dashboard_taxpayer.pdf",
@@ -61,15 +60,6 @@ def test_preparer_html_contains_ks36_section(sample_module, tmp_path) -> None:
     html = (tmp_path / "sample_dashboard_preparer.html").read_text(encoding="utf-8")
     assert 'id="ks36"' in html
     assert "Vorbereiter-Modus" in html
-
-
-def test_canonical_html_mirrors_taxpayer_variant(sample_module, tmp_path) -> None:
-    """docs/tax_overview.md links to sample_dashboard.html — it must
-    equal the taxpayer variant (the third-party-safe one)."""
-    sample_module.main()
-    canonical = (tmp_path / "sample_dashboard.html").read_text(encoding="utf-8")
-    taxpayer = (tmp_path / "sample_dashboard_taxpayer.html").read_text(encoding="utf-8")
-    assert canonical == taxpayer
 
 
 def test_documented_page_exists() -> None:

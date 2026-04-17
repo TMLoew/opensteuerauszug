@@ -1,7 +1,7 @@
 # ============================================
 # SENSITIVE TAX DATA - DO NOT COMMIT
 # ============================================
-
+/tools
 # PDF output files (contain personal tax data)
 /*.pdf
 **/*.pdf
@@ -9,6 +9,12 @@
 # XML files (contain personal financial data)
 /out/*.xml
 /data/*.xml
+
+# Generated tax-overview samples: allow only the canonical synthetic
+# HTML dashboard. All other outputs (binary workbooks, PDFs, variant
+# HTMLs) are regenerated locally and must stay out of the repo.
+/docs/samples/tax_overview/*
+!/docs/samples/tax_overview/sample_dashboard.html
 
 # Manual prices CSV (may contain portfolio information)
 /data/manual_prices.csv
