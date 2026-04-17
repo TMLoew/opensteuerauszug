@@ -2,8 +2,16 @@
 
 from .cli import tax_overview_command
 from .conversion import CHF, CHF_QUANTUM, MoneyCHF, sum_chf, to_chf
+from .data import (
+    FeeEvent,
+    FXRateUsed,
+    IncomeEvent,
+    PositionSummary,
+    TaxOverviewData,
+)
 from .fifo import FifoError, FifoResult, Lot, LotClose, apply_orders
 from .orders import DEFAULT_TIME_CLUSTER_WINDOW, Fill, Order, reconstruct_orders
+from .render import render_workbook
 from .waterfall import (
     DEFAULT_RECONCILIATION_TOLERANCE_CHF,
     Waterfall,
@@ -25,14 +33,19 @@ __all__ = [
     "CHF_QUANTUM",
     "DEFAULT_RECONCILIATION_TOLERANCE_CHF",
     "DEFAULT_TIME_CLUSTER_WINDOW",
+    "FeeEvent",
+    "FXRateUsed",
     "FifoError",
     "FifoResult",
     "Fill",
+    "IncomeEvent",
     "Lot",
     "LotClose",
     "MoneyCHF",
     "Order",
     "OutputFormat",
+    "PositionSummary",
+    "TaxOverviewData",
     "TaxOverviewRequest",
     "Waterfall",
     "WaterfallLine",
@@ -41,6 +54,7 @@ __all__ = [
     "compute_report_hash",
     "parse_formats",
     "reconstruct_orders",
+    "render_workbook",
     "sum_chf",
     "tax_overview_command",
     "to_chf",
