@@ -268,6 +268,10 @@ If doing active development it is best to place any real tax data including the 
 
 See [docs/verify_existing.md](verify_existing.md) for instructions on verifying or recalculating an existing Steuerauszug (eCH-0196 XML) with OpenSteuerAuszug.
 
+## Tax Overview Mode (Kanton SG dashboard)
+
+For the optional three-format dashboard tailored to Kanton St. Gallen filings — xlsx workbook, self-contained HTML report, and single-page PDF cover — see [docs/tax_overview.md](tax_overview.md). It covers the CLI (`steuerauszug tax-overview …`), the nine visible sheets, the Vermögenszuwachs waterfall, DA-1 Hilfstabelle, third-party safety invariants, and the `--preparer-mode` KS 36 self-check.
+
 ---
 ---
 

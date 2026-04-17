@@ -90,6 +90,10 @@ Workbook sheets (left-to-right): `Übersicht`, `Wertschriften`,
 form), `DA1_Hilfstabelle` (foreign withholding-tax reclaim table),
 `Kauf_Verkauf`, `Dividenden`, `Zinsen`, `Gebühren`, `FX_Kurse`.
 
+See the dedicated [Tax Overview guide](docs/tax_overview.md) for the
+full sheet-by-sheet reference, reconciliation semantics, third-party
+safety invariants, and a committed [sample HTML dashboard](docs/samples/tax_overview/sample_dashboard.html).
+
 ### Appending Additional Documents
 
 You can attach original broker statements or other supporting documents to the generated PDF using `--pre-amble` and `--post-amble` options. See the [User Guide](docs/user_guide.md#appending-additional-documents) for details.
