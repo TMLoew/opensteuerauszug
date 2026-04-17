@@ -14,6 +14,7 @@ from openpyxl import Workbook
 from .data import TaxOverviewData
 from .design import register_named_styles
 from .sheets import (
+    write_da1_sheet,
     write_dividends_sheet,
     write_fees_sheet,
     write_fx_rates_sheet,
@@ -21,6 +22,7 @@ from .sheets import (
     write_orders_sheet,
     write_securities_sheet,
     write_uebersicht_sheet,
+    write_verzeichnis_sheet,
 )
 
 
@@ -42,6 +44,10 @@ def render_workbook(data: TaxOverviewData) -> Workbook:
 
     write_uebersicht_sheet(wb, data)
     write_securities_sheet(wb, data)
+    # SG-specific sheets go next — the tax clerk's reading order is
+    # "what's the total?" → "which SG lines?" → "DA-1?" → transactional detail.
+    write_verzeichnis_sheet(wb, data)
+    write_da1_sheet(wb, data)
     write_orders_sheet(wb, data)
     write_dividends_sheet(wb, data)
     write_interest_sheet(wb, data)

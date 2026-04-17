@@ -52,6 +52,37 @@ After installing, see the [User Guide](docs/user_guide.md) for preparation steps
 
 The tool can also be used to cross check and existing existing Steuerauszug (eCH-0196 XML). See See [verify instructions](docs/verify_existing.md).
 
+### Tax Overview Mode (Kanton SG dashboard)
+
+Alongside the standard eCH-0196 output, OpenSteuerAuszug can generate a
+**tax-authority-friendly dashboard** tailored to Kanton St. Gallen filings.
+It produces three artifacts per run — an xlsx workbook, an HTML report, and
+a PDF cover — that expose realized gains, dividend / interest breakdowns,
+the Vermögenszuwachs waterfall, and DA-1-ready foreign withholding-tax
+figures on one page.
+
+```bash
+steuerauszug tax-overview \
+  --input data/ibkr_2025.xml \
+  --broker ibkr \
+  --year 2025 \
+  --output-dir out/
+```
+
+Key properties:
+- CHF figures use the ESTV Kursliste (daily FX rates and per-ISIN
+  Steuerwerte) so they match what the tax office will compute.
+- The Vermögenszuwachs waterfall reconciles against the eCH-0196 closing
+  total within ±CHF 1.
+- KS 36 (gewerbsmässiger Wertschriftenhandel) self-check sheets are kept
+  out of non-preparer exports by default — pass `--preparer-mode` to
+  include the hidden `_KS36_*` sheets in the workbook.
+
+Workbook sheets (left-to-right): `Übersicht`, `Wertschriften`,
+`SG_Verzeichnis` (copy-paste into the Kanton SG Wertschriftenverzeichnis
+form), `DA1_Hilfstabelle` (foreign withholding-tax reclaim table),
+`Kauf_Verkauf`, `Dividenden`, `Zinsen`, `Gebühren`, `FX_Kurse`.
+
 ### Appending Additional Documents
 
 You can attach original broker statements or other supporting documents to the generated PDF using `--pre-amble` and `--post-amble` options. See the [User Guide](docs/user_guide.md#appending-additional-documents) for details.

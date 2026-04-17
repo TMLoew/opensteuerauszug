@@ -77,6 +77,50 @@ class FXRateUsed:
     source: str = "kursliste"
 
 
+@dataclass(frozen=True)
+class VerzeichnisLine:
+    """One row of the SG Wertschriftenverzeichnis mapping sheet.
+
+    Consolidates everything a taxpayer needs to copy into the canton's
+    securities-register form: market value at year-end, full-year gross
+    income, and the two withholding-tax flavours (CH Verrechnungssteuer vs.
+    foreign Quellensteuer). ``form_field`` names the SG line — kept as a
+    free-form string because the exact numbering shifts year to year.
+    """
+
+    form_field: str
+    investment_type: str  # "Aktie" | "Obligation" | "Fonds" | "Sonstige"
+    isin: Optional[str]
+    description: str
+    quantity: Decimal
+    market_value_chf: Decimal
+    income_gross_chf: Decimal
+    verrechnungssteuer_chf: Decimal
+    auslaendische_quellensteuer_chf: Decimal
+
+
+@dataclass(frozen=True)
+class DA1Claim:
+    """One DA-1 reclaim line for foreign withholding tax.
+
+    ``withholding_rate`` and ``treaty_rate_ceiling`` are decimals (0.15, not
+    15). ``recoverable_chf`` is what the pipeline has already decided is
+    recoverable — typically equal to ``withholding_tax_chf`` when the actual
+    rate is at or below the treaty ceiling, otherwise capped. The sheet
+    writer does not recompute.
+    """
+
+    isin: Optional[str]
+    symbol: str
+    description: str
+    source_country: str  # ISO 3166-1 alpha-2, e.g. "US"
+    gross_chf: Decimal
+    withholding_tax_chf: Decimal
+    withholding_rate: Decimal
+    treaty_rate_ceiling: Optional[Decimal]
+    recoverable_chf: Decimal
+
+
 @dataclass
 class TaxOverviewData:
     """Everything the sheet writers need, already CHF-normalised."""
@@ -94,6 +138,8 @@ class TaxOverviewData:
     interest: List[IncomeEvent] = field(default_factory=list)
     fees: List[FeeEvent] = field(default_factory=list)
     fx_rates: List[FXRateUsed] = field(default_factory=list)
+    verzeichnis_lines: List[VerzeichnisLine] = field(default_factory=list)
+    da1_claims: List[DA1Claim] = field(default_factory=list)
 
     def realized_pnl_chf(self) -> Decimal:
         """Total realized P&L across all FIFO closes (CHF).
@@ -123,3 +169,6 @@ class TaxOverviewData:
             (abs(o.total_commission) for o in self.orders), Decimal(0)
         )
         return fee_sum + commission_sum
+
+    def total_da1_recoverable_chf(self) -> Decimal:
+        return sum((c.recoverable_chf for c in self.da1_claims), Decimal(0))

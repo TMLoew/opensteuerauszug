@@ -44,6 +44,7 @@ def _write_kpi_tiles(ws, data: TaxOverviewData, *, start_row: int) -> int:
         ("Dividenden brutto (CHF)", data.total_dividends_chf()),
         ("Zinsen brutto (CHF)", data.total_interest_chf()),
         ("Quellensteuer (CHF)", data.total_withholding_tax_chf()),
+        ("DA-1 rückforderbar (CHF)", data.total_da1_recoverable_chf()),
         ("Gebühren gesamt (CHF)", data.total_fees_chf()),
     ]
     # Two-column tile grid: columns 1 (label) + 2 (value).

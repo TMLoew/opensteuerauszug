@@ -156,9 +156,13 @@ def test_workbook_has_all_visible_sheets_in_canonical_order(
     sample_data: TaxOverviewData,
 ) -> None:
     wb = render_workbook(sample_data)
+    # SG-specific sheets (SG_Verzeichnis, DA1_Hilfstabelle) land between
+    # Wertschriften and Kauf_Verkauf — covered in phase 6 tests.
     assert wb.sheetnames == [
         "Übersicht",
         "Wertschriften",
+        "SG_Verzeichnis",
+        "DA1_Hilfstabelle",
         "Kauf_Verkauf",
         "Dividenden",
         "Zinsen",
