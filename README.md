@@ -76,7 +76,11 @@ Key properties:
   total within ±CHF 1.
 - KS 36 (gewerbsmässiger Wertschriftenhandel) self-check sheets are kept
   out of non-preparer exports by default — pass `--preparer-mode` to
-  include the hidden `_KS36_*` sheets in the workbook.
+  include the hidden `_KS36_*` sheets in the workbook and the equivalent
+  KS 36 section in the HTML report.
+- The HTML report is a single self-contained document (no external
+  stylesheets or scripts) that shares the workbook's palette and Swiss
+  number formatting, so the two views stay visually consistent.
 
 Workbook sheets (left-to-right): `Übersicht`, `Wertschriften`,
 `SG_Verzeichnis` (copy-paste into the Kanton SG Wertschriftenverzeichnis

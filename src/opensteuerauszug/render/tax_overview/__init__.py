@@ -14,6 +14,7 @@ from .data import (
     VerzeichnisLine,
 )
 from .fifo import FifoError, FifoResult, Lot, LotClose, apply_orders
+from .html import format_chf, format_date, format_number, format_percent, render_html
 from .orders import DEFAULT_TIME_CLUSTER_WINDOW, Fill, Order, reconstruct_orders
 from .render import render_workbook
 from .waterfall import (
@@ -60,8 +61,13 @@ __all__ = [
     "apply_orders",
     "build_waterfall",
     "compute_report_hash",
+    "format_chf",
+    "format_date",
+    "format_number",
+    "format_percent",
     "parse_formats",
     "reconstruct_orders",
+    "render_html",
     "render_workbook",
     "sum_chf",
     "tax_overview_command",
