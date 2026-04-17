@@ -100,6 +100,47 @@ class VerzeichnisLine:
 
 
 @dataclass(frozen=True)
+class KS36Criterion:
+    """One ESTV Kreisschreiben 36 criterion evaluation.
+
+    Lives on the hidden ``_KS36_Criteria`` sheet that only preparer-mode
+    exports include. The 5 ESTV criteria for gewerbsmässiger Wertschriften-
+    handel are:
+
+    - ``holding_period``   — share of positions held < 6 months
+    - ``volume_ratio``     — transaction volume / opening portfolio
+    - ``gains_income_ratio`` — realized capital gains / net income
+    - ``leverage``         — margin debt relative to portfolio value
+    - ``derivatives``      — non-hedging derivatives activity
+
+    ``status`` is the traffic-light judgment: "green" / "amber" / "red".
+    ``triggered`` is true when observed crosses threshold (i.e. "red"
+    territory). The preparer reads the holistic picture — this module
+    never issues a final verdict itself.
+    """
+
+    code: str
+    label: str
+    observed_value: Decimal
+    threshold: Decimal
+    unit: str  # "percent" | "ratio" | "count" | "chf"
+    triggered: bool
+    status: str  # "green" | "amber" | "red"
+    note: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class KS36Evidence:
+    """One supporting row for the hidden ``_KS36_Evidence`` sheet."""
+
+    criterion_code: str
+    category: str  # e.g. "short_held_close" | "margin_interest" | "option_trade"
+    description: str
+    value_chf: Decimal
+    evidence_date: Optional[date] = None
+
+
+@dataclass(frozen=True)
 class DA1Claim:
     """One DA-1 reclaim line for foreign withholding tax.
 
@@ -140,6 +181,8 @@ class TaxOverviewData:
     fx_rates: List[FXRateUsed] = field(default_factory=list)
     verzeichnis_lines: List[VerzeichnisLine] = field(default_factory=list)
     da1_claims: List[DA1Claim] = field(default_factory=list)
+    ks36_criteria: List[KS36Criterion] = field(default_factory=list)
+    ks36_evidence: List[KS36Evidence] = field(default_factory=list)
 
     def realized_pnl_chf(self) -> Decimal:
         """Total realized P&L across all FIFO closes (CHF).

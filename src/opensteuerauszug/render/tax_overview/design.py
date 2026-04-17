@@ -113,6 +113,11 @@ class StyleName:
     BODY_DATE = "tax_overview_body_date"
     KPI_LABEL = "tax_overview_kpi_label"
     KPI_VALUE = "tax_overview_kpi_value"
+    # Traffic-light styles — reserved for hidden KS36 sheets only. Using these
+    # on a visible sheet violates the spec's third-party-safety rule.
+    KS36_GREEN = "tax_overview_ks36_green"
+    KS36_AMBER = "tax_overview_ks36_amber"
+    KS36_RED = "tax_overview_ks36_red"
 
 
 def _named(name: str, *, font: Font, fill: PatternFill | None = None,
@@ -156,6 +161,12 @@ def register_named_styles(workbook) -> None:
                alignment=ALIGN_LEFT, border=None),
         _named(StyleName.KPI_VALUE, font=FONT_KPI_VALUE, fill=FILL_KPI_TILE,
                number_format=NUMBER_FORMAT_CHF, alignment=ALIGN_RIGHT, border=None),
+        _named(StyleName.KS36_GREEN, font=FONT_BODY, fill=FILL_AMPEL_GREEN,
+               alignment=ALIGN_LEFT, border=None),
+        _named(StyleName.KS36_AMBER, font=FONT_BODY, fill=FILL_AMPEL_AMBER,
+               alignment=ALIGN_LEFT, border=None),
+        _named(StyleName.KS36_RED, font=FONT_BODY, fill=FILL_AMPEL_RED,
+               alignment=ALIGN_LEFT, border=None),
     ]
     for style in defs:
         if style.name not in existing:

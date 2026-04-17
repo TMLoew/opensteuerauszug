@@ -3,11 +3,15 @@
 from .cli import tax_overview_command
 from .conversion import CHF, CHF_QUANTUM, MoneyCHF, sum_chf, to_chf
 from .data import (
+    DA1Claim,
     FeeEvent,
     FXRateUsed,
     IncomeEvent,
+    KS36Criterion,
+    KS36Evidence,
     PositionSummary,
     TaxOverviewData,
+    VerzeichnisLine,
 )
 from .fifo import FifoError, FifoResult, Lot, LotClose, apply_orders
 from .orders import DEFAULT_TIME_CLUSTER_WINDOW, Fill, Order, reconstruct_orders
@@ -33,12 +37,15 @@ __all__ = [
     "CHF_QUANTUM",
     "DEFAULT_RECONCILIATION_TOLERANCE_CHF",
     "DEFAULT_TIME_CLUSTER_WINDOW",
+    "DA1Claim",
     "FeeEvent",
     "FXRateUsed",
     "FifoError",
     "FifoResult",
     "Fill",
     "IncomeEvent",
+    "KS36Criterion",
+    "KS36Evidence",
     "Lot",
     "LotClose",
     "MoneyCHF",
@@ -47,6 +54,7 @@ __all__ = [
     "PositionSummary",
     "TaxOverviewData",
     "TaxOverviewRequest",
+    "VerzeichnisLine",
     "Waterfall",
     "WaterfallLine",
     "apply_orders",

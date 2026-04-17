@@ -3,8 +3,8 @@
 :func:`render_workbook` is the pure "data in → openpyxl.Workbook out"
 function that every format writer (xlsx, html via worksheet export, PDF
 cover) builds on. Order of sheet creation matches the spec's left-to-right
-tab order; the KS36 hidden sheets are intentionally absent here — phase 7
-adds them under the preparer-mode flag.
+tab order; the hidden KS36 sheets are appended last under the
+``preparer_mode`` flag so third-party exports never ship them.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from .sheets import (
     write_fees_sheet,
     write_fx_rates_sheet,
     write_interest_sheet,
+    write_ks36_criteria_sheet,
+    write_ks36_evidence_sheet,
     write_orders_sheet,
     write_securities_sheet,
     write_uebersicht_sheet,
@@ -27,12 +29,12 @@ from .sheets import (
 
 
 def render_workbook(data: TaxOverviewData) -> Workbook:
-    """Build the visible workbook from a fully-prepared :class:`TaxOverviewData`.
+    """Build the workbook from a fully-prepared :class:`TaxOverviewData`.
 
-    Sheet order (left-to-right): Übersicht, Wertschriften, Kauf_Verkauf,
-    Dividenden, Zinsen, Gebühren, FX_Kurse. Preparer-only KS36 sheets are
-    appended by a separate writer in phase 7 so this orchestrator stays
-    unconditional.
+    Visible sheet order (left-to-right): Übersicht, Wertschriften,
+    SG_Verzeichnis, DA1_Hilfstabelle, Kauf_Verkauf, Dividenden, Zinsen,
+    Gebühren, FX_Kurse. Hidden ``_KS36_Criteria`` and ``_KS36_Evidence``
+    sheets are appended only when ``data.preparer_mode`` is true.
     """
     wb = Workbook()
     # openpyxl starts with a default "Sheet"; remove before adding ours so the
@@ -53,5 +55,12 @@ def render_workbook(data: TaxOverviewData) -> Workbook:
     write_interest_sheet(wb, data)
     write_fees_sheet(wb, data)
     write_fx_rates_sheet(wb, data)
+
+    if data.preparer_mode:
+        # Hidden KS36 sheets carry preparer-only content and are created with
+        # ``sheet_state = "hidden"`` by the writers themselves. Gate here so
+        # third-party exports (preparer_mode=False) skip them entirely.
+        write_ks36_criteria_sheet(wb, data)
+        write_ks36_evidence_sheet(wb, data)
 
     return wb
