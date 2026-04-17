@@ -1,7 +1,9 @@
 """Tax-overview writer: orchestrates xlsx / html / pdf output.
 
-Phase 1 produces a minimal but valid workbook skeleton (Übersicht sheet only,
-with placeholder content). Later phases add sheets, HTML, and PDF.
+Runs the broker import + calculate pipeline (via :mod:`pipeline`) to
+produce a :class:`TaxOverviewData`, then hands it to the format-specific
+renderers. No placeholder content — every sheet, the HTML dashboard, and
+the PDF cover render from the same source of truth.
 """
 
 from __future__ import annotations
@@ -9,11 +11,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional
+from typing import List, Literal, Optional
 
-from openpyxl import Workbook
-
-from .design import StyleName, register_named_styles
+from .data import TaxOverviewData
+from .html import render_html
+from .pdf_cover import render_pdf_cover
+from .pipeline import build_tax_overview_data
+from .render import render_workbook
 
 
 OutputFormat = Literal["xlsx", "html", "pdf"]
@@ -47,25 +51,39 @@ def compute_report_hash(request: TaxOverviewRequest) -> str:
     h.update(b"\x00")
     h.update(request.broker.encode("utf-8"))
     h.update(b"\x00")
-    with request.input_path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
+    if request.input_path.is_file():
+        with request.input_path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    else:
+        # Directory input (Schwab): hash the sorted list of file names + sizes.
+        for child in sorted(request.input_path.rglob("*")):
+            if child.is_file():
+                h.update(str(child.relative_to(request.input_path)).encode("utf-8"))
+                h.update(str(child.stat().st_size).encode("utf-8"))
     return h.hexdigest()
 
 
 def write_tax_overview(request: TaxOverviewRequest) -> List[Path]:
     """Entry point. Produce the requested formats, return the generated paths."""
     request.output_dir.mkdir(parents=True, exist_ok=True)
-    report_hash = compute_report_hash(request)
+
+    result = build_tax_overview_data(
+        input_path=request.input_path,
+        broker=request.broker,
+        tax_year=request.tax_year,
+        preparer_mode=request.preparer_mode,
+    )
+    data = result.data
 
     produced: List[Path] = []
     for fmt in request.formats:
         if fmt == "xlsx":
-            produced.append(_write_xlsx(request, report_hash))
+            produced.append(_write_xlsx(request, data))
         elif fmt == "html":
-            produced.append(_write_html_stub(request, report_hash))
+            produced.append(_write_html(request, data))
         elif fmt == "pdf":
-            produced.append(_write_pdf_stub(request, report_hash))
+            produced.append(_write_pdf(request, data))
         else:  # pragma: no cover - typer validates enum
             raise ValueError(f"unknown output format: {fmt}")
     return produced
@@ -75,83 +93,25 @@ def _output_path(request: TaxOverviewRequest, suffix: str) -> Path:
     return request.output_dir / f"tax_overview_{request.tax_year}{suffix}"
 
 
-def _write_xlsx(request: TaxOverviewRequest, report_hash: str) -> Path:
-    wb = Workbook()
-    register_named_styles(wb)
-
-    ws = wb.active
-    ws.title = "Übersicht"
-    ws["A1"] = f"Steuer-Übersicht {request.tax_year}"
-    ws["A1"].style = StyleName.KPI_VALUE
-    ws["A3"] = "Platzhalter — Inhalt folgt in nachfolgenden Phasen."
-    ws["A3"].style = StyleName.BODY_TEXT
-    ws["A5"] = "Belegnummer"
-    ws["A5"].style = StyleName.KPI_LABEL
-    ws["B5"] = report_hash[:8]
-    ws["B5"].style = StyleName.BODY_TEXT
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 40
-
+def _write_xlsx(request: TaxOverviewRequest, data: TaxOverviewData) -> Path:
+    workbook = render_workbook(data)
     path = _output_path(request, ".xlsx")
-    wb.save(path)
+    workbook.save(path)
     return path
 
 
-def _write_html_stub(request: TaxOverviewRequest, report_hash: str) -> Path:
+def _write_html(request: TaxOverviewRequest, data: TaxOverviewData) -> Path:
+    html = render_html(data)
     path = _output_path(request, ".html")
-    path.write_text(
-        f"<!doctype html>\n"
-        f"<html lang=\"de-CH\"><head><meta charset=\"utf-8\">"
-        f"<title>Steuer-Übersicht {request.tax_year}</title></head>"
-        f"<body><h1>Steuer-Übersicht {request.tax_year}</h1>"
-        f"<p>Platzhalter — Inhalt folgt.</p>"
-        f"<p>Belegnummer: {report_hash[:8]}</p></body></html>\n",
-        encoding="utf-8",
-    )
+    path.write_text(html, encoding="utf-8")
     return path
 
 
-def _write_pdf_stub(request: TaxOverviewRequest, report_hash: str) -> Path:
-    # Produce a tiny valid PDF without pulling in reportlab yet — phase 9
-    # replaces this with a proper cover page.
+def _write_pdf(request: TaxOverviewRequest, data: TaxOverviewData) -> Path:
+    pdf_bytes = render_pdf_cover(data)
     path = _output_path(request, ".pdf")
-    pdf_bytes = _minimal_pdf_bytes(
-        f"Steuer-Übersicht {request.tax_year} — Beleg {report_hash[:8]}"
-    )
     path.write_bytes(pdf_bytes)
     return path
-
-
-def _minimal_pdf_bytes(text: str) -> bytes:
-    """Smallest valid single-page PDF containing the given text.
-
-    Hand-rolled so the phase-1 stub has no dependency on reportlab's formatting
-    machinery. Phase 9 replaces this with the real cover writer.
-    """
-    safe = text.replace("(", r"\(").replace(")", r"\)")
-    stream = f"BT /F1 18 Tf 72 720 Td ({safe}) Tj ET".encode("latin-1", errors="replace")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
-         b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"),
-        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ]
-    out = bytearray(b"%PDF-1.4\n")
-    offsets: list[int] = []
-    for idx, obj in enumerate(objects, start=1):
-        offsets.append(len(out))
-        out += f"{idx} 0 obj\n".encode() + obj + b"\nendobj\n"
-    xref_pos = len(out)
-    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
-    for off in offsets:
-        out += f"{off:010d} 00000 n \n".encode()
-    out += (
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
-        f"startxref\n{xref_pos}\n%%EOF\n"
-    ).encode()
-    return bytes(out)
 
 
 def parse_formats(value: Optional[str]) -> tuple[OutputFormat, ...]:

@@ -6,6 +6,7 @@ These tests only guarantee the scaffold exists and produces valid files.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -19,12 +20,15 @@ from opensteuerauszug.render.tax_overview import (
     parse_formats,
     write_tax_overview,
 )
+from opensteuerauszug.render.tax_overview.data import TaxOverviewData
 from opensteuerauszug.render.tax_overview.design import (
     PALETTE,
     StyleName,
     css_variables,
     register_named_styles,
 )
+from opensteuerauszug.render.tax_overview.pipeline import PipelineResult
+from opensteuerauszug.render.tax_overview.waterfall import Waterfall
 from opensteuerauszug.steuerauszug import app
 
 
@@ -33,6 +37,46 @@ def dummy_statement(tmp_path: Path) -> Path:
     path = tmp_path / "stub_statement.xml"
     path.write_text("<FlexQueryResponse/>\n", encoding="utf-8")
     return path
+
+
+def _empty_tax_overview_data(*, preparer_mode: bool, tax_year: int) -> TaxOverviewData:
+    return TaxOverviewData(
+        tax_year=tax_year,
+        broker="ibkr",
+        preparer_mode=preparer_mode,
+        opening_value_chf=Decimal("0"),
+        closing_value_chf=Decimal("0"),
+        waterfall=Waterfall(
+            opening=Decimal("0"), inflows=[], outflows=[], closing=Decimal("0")
+        ),
+        positions=[], orders=[], lot_closes=[],
+        dividends=[], interest=[], fees=[], fx_rates=[],
+        verzeichnis_lines=[], da1_claims=[],
+        ks36_criteria=[], ks36_evidence=[],
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bypass the real broker+Kursliste pipeline in scaffold tests.
+
+    Phase-1 tests exercise the writer wiring (format dispatch, KS36 gating,
+    CLI surface) — not pipeline correctness. Feeding them a minimal
+    TaxOverviewData keeps the tests hermetic and fast.
+    """
+
+    def _fake_build(*, input_path: Path, broker: str, tax_year: int,
+                    preparer_mode: bool = False, **_kwargs) -> PipelineResult:
+        from opensteuerauszug.model.ech0196 import TaxStatement
+        data = _empty_tax_overview_data(preparer_mode=preparer_mode, tax_year=tax_year)
+        # The writer consumes only `data`; skip validation so we don't have to
+        # synthesise an entire eCH-0196 tree just to satisfy pydantic.
+        return PipelineResult(data=data, statement=TaxStatement.model_construct())
+
+    monkeypatch.setattr(
+        "opensteuerauszug.render.tax_overview.writer.build_tax_overview_data",
+        _fake_build,
+    )
 
 
 @pytest.fixture
