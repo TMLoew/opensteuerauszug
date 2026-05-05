@@ -23,6 +23,11 @@
 # Security identifiers (may contain personal portfolio info)
 /data/security_identifiers.csv
 
+# Pipeline-managed caches and large Kursliste archives — personal portfolio
+# data leaks via ISIN keys; the zip is too large to ship in-repo.
+/data/cache/
+/data/kursliste_*.zip
+
 # Configuration files (may contain personal information)
 /config.toml
 /config.local.toml
