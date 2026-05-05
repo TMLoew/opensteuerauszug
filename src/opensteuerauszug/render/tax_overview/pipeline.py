@@ -89,8 +89,27 @@ def build_tax_overview_data(
     kursliste_dir: Optional[Path] = None,
     config_file: Optional[Path] = None,
     identifiers_csv: Optional[Path] = None,
+    prior_year_input_path: Optional[Path] = None,
 ) -> PipelineResult:
-    """Run the broker pipeline and translate the result to TaxOverviewData."""
+    """Run the broker pipeline and translate the result to TaxOverviewData.
+
+    When ``prior_year_input_path`` is given, the prior year's closing values
+    (Kursliste-driven taxValue per ISIN) override the current year's opening
+    fallbacks. This avoids the "earliest 2024 mutation price" trap where one
+    discounted Jan trade silently anchors the entire year-start valuation.
+    """
+    prior_year_closing: Dict[str, Decimal] = {}
+    prior_year_closing_total: Optional[Decimal] = None
+    if prior_year_input_path is not None:
+        prior_year_closing, prior_year_closing_total = _build_prior_year_closing(
+            input_path=prior_year_input_path,
+            broker=broker,
+            tax_year=tax_year - 1,
+            kursliste_dir=kursliste_dir,
+            config_file=config_file,
+            identifiers_csv=identifiers_csv,
+        )
+
     statement = _run_pipeline(
         input_path=input_path,
         broker=broker,
@@ -105,8 +124,53 @@ def build_tax_overview_data(
     data = _translate_statement(
         statement, broker=broker, tax_year=tax_year,
         preparer_mode=preparer_mode, fallback=broker_fallback,
+        prior_year_closing_by_isin=prior_year_closing,
+        prior_year_closing_total=prior_year_closing_total,
     )
     return PipelineResult(data=data, statement=statement)
+
+
+def _build_prior_year_closing(
+    *,
+    input_path: Path,
+    broker: str,
+    tax_year: int,
+    kursliste_dir: Optional[Path],
+    config_file: Optional[Path],
+    identifiers_csv: Optional[Path],
+) -> Tuple[Dict[str, Decimal], Decimal]:
+    """Run the prior-year pipeline and return (per-ISIN closing CHF, total CHF).
+
+    Reuses the full import + cleanup + Kursliste calculator chain so the
+    closing values come from the official year-end Kursliste prices — far
+    more reliable than the current year's "earliest mutation" fallback.
+    """
+    try:
+        statement = _run_pipeline(
+            input_path=input_path,
+            broker=broker,
+            tax_year=tax_year,
+            kursliste_dir=kursliste_dir,
+            config_file=config_file,
+            identifiers_csv=identifiers_csv,
+        )
+    except Exception as exc:
+        logger.warning(
+            "tax-overview: prior-year pipeline failed (%s); falling back to "
+            "current-year opening computation", exc,
+        )
+        return {}, ZERO
+
+    period_end = date(tax_year, 12, 31)
+    fallback = (
+        _extract_ibkr_flex_fallback(input_path) if broker == "ibkr" else BrokerFallback.empty()
+    )
+    positions = _collect_positions(statement, period_end=period_end, fallback=fallback)
+    by_isin: Dict[str, Decimal] = {}
+    for pos in positions:
+        if pos.isin and pos.market_value_chf:
+            by_isin[pos.isin] = pos.market_value_chf
+    return by_isin, _sum_security_closing(positions)
 
 
 @dataclass(frozen=True)
@@ -120,18 +184,37 @@ class BrokerFallback:
 
     # ISIN → (positionValue in local currency, currency)
     open_position_value: Dict[str, Tuple[Decimal, str]]
+    # ISIN → Flex subCategory asset-class label (ETF, COMMON, REIT, BOND, ...)
+    # Used as a sector fallback when yfinance returns nothing.
+    asset_class_by_isin: Dict[str, str]
     # currency → CHF rate at 31.12
     year_end_fx: Dict[str, Decimal]
-    # CHF total of Deposits/Withdrawals CashTransactions during the period
+    # CHF total of opening cash across all currencies, parsed from the Flex
+    # CashReportCurrency.startingCash. Often zero in default flex queries —
+    # signal "unknown" via ``bank_opening_known`` rather than guessing.
+    bank_opening_cash_chf: Decimal
+    bank_opening_known: bool
+    # CHF total of Deposits/Withdrawals CashTransactions during the period (net, signed)
     cash_deposits_chf: Decimal
+    # CHF total of deposit-side cash-flows only (always >= 0)
+    cash_deposits_gross_chf: Decimal
+    # CHF total of withdrawal-side cash-flows (always >= 0, stored unsigned for display)
+    cash_withdrawals_chf: Decimal
     # CHF total of debit-side Broker Interest Paid (margin interest) — treated as fees
     debit_interest_chf: Decimal
 
     @classmethod
     def empty(cls) -> "BrokerFallback":
         return cls(
-            open_position_value={}, year_end_fx={},
-            cash_deposits_chf=ZERO, debit_interest_chf=ZERO,
+            open_position_value={},
+            asset_class_by_isin={},
+            year_end_fx={},
+            cash_deposits_chf=ZERO,
+            cash_deposits_gross_chf=ZERO,
+            cash_withdrawals_chf=ZERO,
+            debit_interest_chf=ZERO,
+            bank_opening_cash_chf=ZERO,
+            bank_opening_known=False,
         )
 
 
@@ -152,6 +235,7 @@ def _extract_ibkr_flex_fallback(flex_xml_path: Path) -> BrokerFallback:
         return BrokerFallback.empty()
 
     open_positions: Dict[str, Tuple[Decimal, str]] = {}
+    asset_class: Dict[str, str] = {}
     for op in tree.iter("OpenPosition"):
         isin = op.get("isin") or ""
         if not isin:
@@ -165,6 +249,9 @@ def _extract_ibkr_flex_fallback(flex_xml_path: Path) -> BrokerFallback:
         open_positions[isin] = (
             (existing[0] + value, currency) if existing else (value, currency)
         )
+        sub = (op.get("subCategory") or "").strip().upper()
+        if sub and isin not in asset_class:
+            asset_class[isin] = sub
 
     year_end_fx: Dict[str, Decimal] = {}
     for cr in tree.iter("ConversionRate"):
@@ -182,6 +269,8 @@ def _extract_ibkr_flex_fallback(flex_xml_path: Path) -> BrokerFallback:
     year_end_fx.setdefault("CHF", Decimal("1"))
 
     deposits = ZERO
+    deposits_gross = ZERO
+    withdrawals = ZERO
     debit_interest = ZERO
     for ct in tree.iter("CashTransaction"):
         ct_type = (ct.get("type") or "").strip()
@@ -196,14 +285,41 @@ def _extract_ibkr_flex_fallback(flex_xml_path: Path) -> BrokerFallback:
         amount_chf = (amount * rate).quantize(Decimal("0.01"))
         if ct_type == "Deposits/Withdrawals":
             deposits += amount_chf
+            if amount_chf >= 0:
+                deposits_gross += amount_chf
+            else:
+                withdrawals += -amount_chf  # store as positive
         elif ct_type == "Broker Interest Paid" and amount < 0:
             debit_interest += -amount_chf  # store as positive outflow
 
+    bank_opening_chf = ZERO
+    bank_opening_known = False
+    for crc in tree.iter("CashReportCurrency"):
+        currency = crc.get("currency") or ""
+        if not currency or currency == "BASE_SUMMARY":
+            continue
+        try:
+            starting = Decimal(crc.get("startingCash") or "0")
+        except Exception:
+            continue
+        if starting == 0:
+            continue
+        rate = year_end_fx.get(currency, Decimal("1") if currency == "CHF" else ZERO)
+        if rate == 0:
+            continue
+        bank_opening_chf += (starting * rate).quantize(Decimal("0.01"))
+        bank_opening_known = True
+
     return BrokerFallback(
         open_position_value=open_positions,
+        asset_class_by_isin=asset_class,
         year_end_fx=year_end_fx,
         cash_deposits_chf=deposits,
+        cash_deposits_gross_chf=deposits_gross,
+        cash_withdrawals_chf=withdrawals,
         debit_interest_chf=debit_interest,
+        bank_opening_cash_chf=bank_opening_chf,
+        bank_opening_known=bank_opening_known,
     )
 
 
@@ -352,6 +468,8 @@ def _translate_statement(
     tax_year: int,
     preparer_mode: bool,
     fallback: Optional[BrokerFallback] = None,
+    prior_year_closing_by_isin: Optional[Dict[str, Decimal]] = None,
+    prior_year_closing_total: Optional[Decimal] = None,
 ) -> TaxOverviewData:
     period_end = date(tax_year, 12, 31)
     fallback = fallback or BrokerFallback.empty()
@@ -364,10 +482,34 @@ def _translate_statement(
     orders = _collect_orders(statement)
     fx_rates = _collect_fx_rates(statement)
 
-    opening_chf = _sum_security_opening(statement, period_start=date(tax_year, 1, 1)) \
-                  + _sum_bank_opening(statement, period_start=date(tax_year, 1, 1))
-    closing_chf = _sum_security_closing(positions) + _sum_bank_closing(statement,
-                                                                        period_end=period_end)
+    # Bank cash opening: prefer the Flex-reported startingCash. The previous
+    # ``closing_cash − tracked_payments`` heuristic silently inflated opening
+    # cash to ≈ closing cash because tracked payments only cover dividends /
+    # interest / fees, not deposits, withdrawals, or trade settlements.
+    bank_opening_chf = (
+        fallback.bank_opening_cash_chf
+        if fallback.bank_opening_known
+        else ZERO
+    )
+    if prior_year_closing_total is not None and prior_year_closing_total > 0:
+        # Authoritative: 2023 Schluss = 2024 Eröffnung. Pulled from the
+        # prior-year pipeline run with its Kursliste — guaranteed to use
+        # the official year-end prices instead of the "earliest mutation"
+        # fallback which can be far off when the first 2024 trade was
+        # discounted (e.g. fractional sale, stop-loss, options).
+        opening_securities_chf = prior_year_closing_total
+    else:
+        opening_securities_chf = _sum_security_opening(
+            statement,
+            period_start=date(tax_year, 1, 1),
+            fx_fallback=fallback.year_end_fx,
+        )
+    closing_securities_chf = _sum_security_closing(positions)
+    bank_closing_chf = _sum_bank_closing(statement, period_end=period_end)
+    # Übersicht waterfall keeps the total-wealth view; Performance uses
+    # securities-only so the return doesn't depend on unknown opening cash.
+    opening_chf = opening_securities_chf + bank_opening_chf
+    closing_chf = closing_securities_chf + bank_closing_chf
 
     verzeichnis = _build_verzeichnis(positions, dividends, interest_events, da1_claims)
 
@@ -387,21 +529,35 @@ def _translate_statement(
 
     sector_lookup = SectorLookup(
         cache_path=Path("data/cache/sector_lookup.json"),
-        online=False,
+        online=True,
     )
-    opening_by_isin = _opening_chf_by_isin(statement, period_start=date(tax_year, 1, 1))
+    opening_by_isin = _opening_chf_by_isin(
+        statement,
+        period_start=date(tax_year, 1, 1),
+        fx_fallback=fallback.year_end_fx,
+    )
+    # Prior-year overrides win per-ISIN; the current-year fallback only fills
+    # ISINs the prior year doesn't carry (e.g. mid-year additions to scope).
+    if prior_year_closing_by_isin:
+        for isin, value in prior_year_closing_by_isin.items():
+            opening_by_isin[isin] = value
     performance = build_performance_section(
         statement,
         tax_year=tax_year,
-        opening_value_chf=opening_chf,
-        closing_value_chf=closing_chf,
+        opening_securities_chf=opening_securities_chf,
+        closing_securities_chf=closing_securities_chf,
+        closing_cash_chf=bank_closing_chf,
+        cash_known=fallback.bank_opening_known,
         net_deposits_chf=fallback.cash_deposits_chf,
+        deposits_gross_chf=fallback.cash_deposits_gross_chf,
+        withdrawals_chf=fallback.cash_withdrawals_chf,
         dividends_chf=dividends_chf,
         interest_chf=interest_chf,
         fees_chf=fees_chf,
         positions=positions,
         opening_by_isin=opening_by_isin,
         sector_lookup=sector_lookup,
+        asset_class_by_isin=fallback.asset_class_by_isin,
     )
 
     return TaxOverviewData(
@@ -861,13 +1017,23 @@ def _collect_fx_rates(statement: TaxStatement) -> List[FXRateUsed]:
 # ---------------------------------------------------------------------------
 
 
-def _security_opening_chf(security: Security, *, period_start: date) -> Decimal:
+def _security_opening_chf(
+    security: Security,
+    *,
+    period_start: date,
+    fx_fallback: Optional[Dict[str, Decimal]] = None,
+) -> Decimal:
     """Return the opening-day CHF value for one security (same rules as the
     aggregate).
 
     Returns :data:`ZERO` when no opening balance exists. Split from the
     aggregate helper so per-ISIN callers (performance tab) get the same
     3-tier fallback without re-implementing it.
+
+    ``fx_fallback`` (currency → CHF rate, typically year-end) is consulted as
+    a last resort when the SecurityStock entries don't carry an exchangeRate.
+    Without it, the Tier-3 path silently treats the local-currency price as
+    CHF, which inflates non-CHF positions by 1/fx (e.g. ~10x for HKD lines).
     """
     opening = _find_opening_stock(security.stock, period_start=period_start)
     if opening is None:
@@ -888,12 +1054,22 @@ def _security_opening_chf(security: Security, *, period_start: date) -> Decimal:
     if rate is None and security.taxValue:
         rate = security.taxValue.exchangeRate
     if rate is None:
-        rate = Decimal("1")
+        currency = (security.currency or "").upper()
+        if currency == "CHF":
+            rate = Decimal("1")
+        elif fx_fallback and currency in fx_fallback and fx_fallback[currency] > 0:
+            rate = fx_fallback[currency]
+        else:
+            # Unknown currency / FX → don't pretend the value is CHF.
+            return ZERO
     return (quantity * price * rate).quantize(Decimal("0.01"))
 
 
 def _opening_chf_by_isin(
-    statement: TaxStatement, *, period_start: date,
+    statement: TaxStatement,
+    *,
+    period_start: date,
+    fx_fallback: Optional[Dict[str, Decimal]] = None,
 ) -> Dict[str, Decimal]:
     """Per-ISIN opening CHF values, for the performance tab.
 
@@ -908,11 +1084,18 @@ def _opening_chf_by_isin(
         for security in depot.security:
             if not security.isin:
                 continue
-            out[security.isin] = _security_opening_chf(security, period_start=period_start)
+            out[security.isin] = _security_opening_chf(
+                security, period_start=period_start, fx_fallback=fx_fallback,
+            )
     return out
 
 
-def _sum_security_opening(statement: TaxStatement, *, period_start: date) -> Decimal:
+def _sum_security_opening(
+    statement: TaxStatement,
+    *,
+    period_start: date,
+    fx_fallback: Optional[Dict[str, Decimal]] = None,
+) -> Decimal:
     """Sum opening-day portfolio value in CHF (see :func:`_security_opening_chf`)."""
     total = ZERO
     los = statement.listOfSecurities
@@ -920,7 +1103,9 @@ def _sum_security_opening(statement: TaxStatement, *, period_start: date) -> Dec
         return total
     for depot in los.depot:
         for security in depot.security:
-            total += _security_opening_chf(security, period_start=period_start)
+            total += _security_opening_chf(
+                security, period_start=period_start, fx_fallback=fx_fallback,
+            )
     return total
 
 
@@ -1011,8 +1196,15 @@ def _build_verzeichnis(
     lines: List[VerzeichnisLine] = []
     for position in positions:
         key = position.isin or position.symbol
+        # Form 2 column A = "Werte mit Verrechnungssteuerabzug": Swiss / FL
+        # securities whose dividends are subject to 35% VSt — classified by
+        # ISIN domicile, not by whether the position actually paid out this
+        # year. The dividend-presence check stays as a backstop for Swiss
+        # securities under foreign ISINs (rare; e.g. depository receipts).
+        domicile_a = (position.isin or "")[:2].upper() in {"CH", "LI"}
+        form_field = "A" if (domicile_a or vstk_by_isin.get(key)) else "B"
         lines.append(VerzeichnisLine(
-            form_field="A" if vstk_by_isin.get(key) else "B",
+            form_field=form_field,
             investment_type=_verzeichnis_type(position),
             isin=position.isin,
             description=position.description,

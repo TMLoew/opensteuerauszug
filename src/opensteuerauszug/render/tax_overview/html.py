@@ -94,13 +94,18 @@ _TEMPLATE_SOURCE = """\
 <style>
 {{ css_variables }}
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 body {
     margin: 0;
-    padding: calc(var(--grid-unit) * 4);
     font-family: var(--font-body);
     color: var(--color-ink);
     background: var(--color-paper);
     line-height: 1.45;
+}
+main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: calc(var(--grid-unit) * 4);
 }
 h1, h2, h3 {
     font-family: var(--font-display);
@@ -108,9 +113,76 @@ h1, h2, h3 {
     margin: 0 0 var(--grid-unit) 0;
 }
 h1 { font-size: 1.75rem; }
-h2 { font-size: 1.25rem; margin-top: calc(var(--grid-unit) * 4); }
+h2 {
+    font-size: 1.25rem;
+    margin-top: 0;
+    padding-bottom: var(--grid-unit);
+    border-bottom: 2px solid var(--color-rule);
+}
 h3 { font-size: 1rem; margin-top: calc(var(--grid-unit) * 2); color: var(--color-ink-muted); }
 .meta { color: var(--color-ink-muted); font-size: 0.875rem; margin-top: 0; }
+/* Sticky wayfinding nav — reviewer jumps to any section without scrolling. */
+.dashnav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--color-paper);
+    border-bottom: 1px solid var(--color-rule);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.dashnav-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: calc(var(--grid-unit) * 1.5) calc(var(--grid-unit) * 4);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--grid-unit);
+    align-items: center;
+}
+.dashnav-brand {
+    font-family: var(--font-display);
+    color: var(--color-primary);
+    font-weight: 700;
+    margin-right: calc(var(--grid-unit) * 2);
+    white-space: nowrap;
+}
+.dashnav-brand small {
+    color: var(--color-ink-muted);
+    font-weight: 400;
+    font-size: 0.8125rem;
+    margin-left: var(--grid-unit);
+}
+.dashnav a {
+    color: var(--color-ink);
+    text-decoration: none;
+    padding: calc(var(--grid-unit) / 2) var(--grid-unit);
+    border-radius: 3px;
+    font-size: 0.8125rem;
+    white-space: nowrap;
+    transition: background 0.1s ease;
+}
+.dashnav a:hover { background: var(--color-paper-warm); color: var(--color-primary); }
+.dashnav a .count {
+    color: var(--color-ink-muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.75rem;
+    margin-left: 4px;
+}
+.dashnav a.preparer { color: var(--color-accent); }
+section[id] {
+    scroll-margin-top: 72px;
+    background: var(--color-paper);
+    border: 1px solid var(--color-rule);
+    border-radius: 4px;
+    padding: calc(var(--grid-unit) * 3);
+    margin-top: calc(var(--grid-unit) * 3);
+}
+section[id]:first-of-type { margin-top: calc(var(--grid-unit) * 2); }
+@media print {
+    .dashnav { display: none; }
+    section[id] { border: none; padding: 0; break-inside: avoid; }
+    section[id] { page-break-inside: avoid; margin-top: calc(var(--grid-unit) * 2); }
+}
 .kpi-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -189,6 +261,22 @@ tbody tr:nth-child(even) td { background: var(--color-paper-warm); }
 </style>
 </head>
 <body>
+<nav class="dashnav" aria-label="Abschnittsnavigation">
+<div class="dashnav-inner">
+<span class="dashnav-brand">Steuer-Übersicht <small>{{ data.tax_year }} · {{ data.broker }}</small></span>
+<a href="#uebersicht">Übersicht</a>
+{% if data.performance %}<a href="#performance">Performance</a>{% endif %}
+<a href="#wertschriften">Wertschriften<span class="count">{{ data.positions|length }}</span></a>
+<a href="#sg-verzeichnis">SG-Verzeichnis<span class="count">{{ data.verzeichnis_lines|length }}</span></a>
+<a href="#da1">DA-1<span class="count">{{ data.da1_claims|length }}</span></a>
+<a href="#kauf-verkauf">Kauf / Verkauf<span class="count">{{ data.orders|length }}</span></a>
+<a href="#dividenden">Dividenden<span class="count">{{ data.dividends|length }}</span></a>
+<a href="#zinsen">Zinsen<span class="count">{{ data.interest|length }}</span></a>
+<a href="#gebuehren">Gebühren<span class="count">{{ data.fees|length }}</span></a>
+<a href="#fx-kurse">FX<span class="count">{{ data.fx_rates|length }}</span></a>
+{% if data.preparer_mode %}<a href="#ks36" class="preparer">KS 36</a>{% endif %}
+</div>
+</nav>
 <main>
 <header>
 <h1>Steuer-Übersicht {{ data.tax_year }}</h1>
@@ -224,14 +312,22 @@ tbody tr:nth-child(even) td { background: var(--color-paper-warm); }
 <section id="performance">
 <h2>Performance</h2>
 <div class="kpi-grid">
-<div class="kpi-tile"><div class="kpi-label">Gesamt-P&amp;L</div><div class="kpi-value {% if perf.summary.total_pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(perf.summary.total_pnl_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Eröffnung Wertschriften</div><div class="kpi-value">{{ fmt_chf(perf.summary.opening_value_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Schluss Wertschriften</div><div class="kpi-value">{{ fmt_chf(perf.summary.closing_value_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Gesamt-P&amp;L (Wertschriften)</div><div class="kpi-value {% if perf.summary.total_pnl_chf >= 0 %}positive{% else %}negative{% endif %}">{{ fmt_chf(perf.summary.total_pnl_chf) }}</div></div>
 <div class="kpi-tile"><div class="kpi-label">Rendite (Dietz)</div><div class="kpi-value {% if perf.summary.money_weighted_return_pct and perf.summary.money_weighted_return_pct >= 0 %}positive{% elif perf.summary.money_weighted_return_pct %}negative{% endif %}">{{ fmt_pct_signed(perf.summary.money_weighted_return_pct) }}</div></div>
 <div class="kpi-tile"><div class="kpi-label">Rendite (einfach)</div><div class="kpi-value">{{ fmt_pct_signed(perf.summary.simple_return_pct) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Schluss Cash</div><div class="kpi-value">{{ fmt_chf(perf.summary.closing_cash_chf) }}{% if not perf.summary.cash_known %} <small style="color:var(--color-ink-muted);font-size:0.7rem;">(Eröffnung n/v)</small>{% endif %}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Einzahlungen</div><div class="kpi-value">{{ fmt_chf(perf.summary.deposits_gross_chf) }}</div></div>
+<div class="kpi-tile"><div class="kpi-label">Auszahlungen</div><div class="kpi-value">{{ fmt_chf(perf.summary.withdrawals_chf) }}</div></div>
 <div class="kpi-tile"><div class="kpi-label">Netto-Einzahlungen</div><div class="kpi-value">{{ fmt_chf(perf.summary.net_deposits_chf) }}</div></div>
 <div class="kpi-tile"><div class="kpi-label">Dividenden</div><div class="kpi-value">{{ fmt_chf(perf.summary.dividends_chf) }}</div></div>
 <div class="kpi-tile"><div class="kpi-label">Zinsen</div><div class="kpi-value">{{ fmt_chf(perf.summary.interest_chf) }}</div></div>
 <div class="kpi-tile"><div class="kpi-label">Gebühren</div><div class="kpi-value">{{ fmt_chf(perf.summary.fees_chf) }}</div></div>
 </div>
+{% if not perf.summary.cash_known %}
+<p class="benchmark-note">Hinweis: Performance basiert auf Wertschriften ohne Cash-Salden (Eröffnungs-Cash im Flex-Export nicht enthalten).</p>
+{% endif %}
 
 <div class="chart-grid">
 {% if perf.benchmarks or perf.summary.money_weighted_return_pct is not none %}

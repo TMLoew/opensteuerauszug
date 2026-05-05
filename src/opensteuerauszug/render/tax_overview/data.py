@@ -190,9 +190,23 @@ class BenchmarkComparison:
 class PerformanceSummary:
     """Top-of-tab KPIs for the whole portfolio."""
 
+    # Securities-only portfolio values (excludes cash). The performance
+    # numerator is built from these so the result is well-defined even when
+    # opening cash is unknown (default Flex queries report ``startingCash=0``).
     opening_value_chf: Decimal
     closing_value_chf: Decimal
+    # Year-end cash position; informational only — never enters the return
+    # math because we typically don't know the opening cash to pair against it.
+    closing_cash_chf: Decimal
+    cash_known: bool
+    # External cash flows into/out of the brokerage account; reported beside
+    # the totals so the reviewer can sanity-check the net-deposit identity.
     net_deposits_chf: Decimal
+    deposits_gross_chf: Decimal
+    withdrawals_chf: Decimal
+    # Net flow between cash and securities (positive = bought net of sales).
+    # Used as the external-flow term in Modified Dietz on the security portfolio.
+    securities_net_flow_chf: Decimal
     total_pnl_chf: Decimal
     dividends_chf: Decimal
     interest_chf: Decimal

@@ -39,6 +39,12 @@ def tax_overview_command(
         help="Include hidden KS36 self-check sheets. NEVER share this workbook "
              "with third parties. Omit for a clean third-party export.",
     ),
+    prior_year_input: Optional[Path] = typer.Option(
+        None, "--prior-year-input",
+        exists=True, file_okay=True, dir_okay=False, readable=True,
+        help="Prior-year broker statement; its Kursliste-derived closing "
+             "values become the current-year opening (2023 Schluss = 2024 Eröffnung).",
+    ),
 ) -> None:
     """Generate a tax-authority-friendly overview workbook for Kanton SG filing."""
     try:
@@ -60,6 +66,7 @@ def tax_overview_command(
         output_dir=output_dir,
         formats=parsed_formats,
         preparer_mode=preparer_mode,
+        prior_year_input_path=prior_year_input,
     )
     produced = write_tax_overview(request)
     for path in produced:

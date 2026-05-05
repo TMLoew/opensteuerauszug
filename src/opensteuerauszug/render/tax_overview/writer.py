@@ -38,6 +38,9 @@ class TaxOverviewRequest:
     output_dir: Path
     formats: tuple[OutputFormat, ...]
     preparer_mode: bool
+    # When set, the prior-year Flex export feeds opening values for the current
+    # year (Kursliste-derived end-of-prior-year = start-of-current-year).
+    prior_year_input_path: Optional[Path] = None
 
 
 def compute_report_hash(request: TaxOverviewRequest) -> str:
@@ -73,6 +76,7 @@ def write_tax_overview(request: TaxOverviewRequest) -> List[Path]:
         broker=request.broker,
         tax_year=request.tax_year,
         preparer_mode=request.preparer_mode,
+        prior_year_input_path=request.prior_year_input_path,
     )
     data = result.data
 

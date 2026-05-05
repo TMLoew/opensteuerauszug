@@ -76,17 +76,28 @@ def build_performance_section(
     statement: TaxStatement,
     *,
     tax_year: int,
-    opening_value_chf: Decimal,
-    closing_value_chf: Decimal,
+    opening_securities_chf: Decimal,
+    closing_securities_chf: Decimal,
+    closing_cash_chf: Decimal = ZERO,
+    cash_known: bool = False,
     net_deposits_chf: Decimal,
+    deposits_gross_chf: Decimal = ZERO,
+    withdrawals_chf: Decimal = ZERO,
     dividends_chf: Decimal,
     interest_chf: Decimal,
     fees_chf: Decimal,
     positions: Sequence[PositionSummary],
     opening_by_isin: Optional[Dict[str, Decimal]] = None,
     sector_lookup: Optional["SectorLookup"] = None,
+    asset_class_by_isin: Optional[Dict[str, str]] = None,
 ) -> PerformanceSection:
     """Assemble the PerformanceSection for a tax year.
+
+    Performance is computed on the *securities portfolio only*. Opening and
+    closing cash are deliberately left out of the return math because most
+    Flex queries don't carry a ``startingCash`` figure and the closing-minus-
+    payments heuristic systematically inflates opening cash. Year-end cash is
+    surfaced as a separate informational tile.
 
     ``opening_by_isin`` overrides the util's opening CHF values (which are
     computed from the raw SecurityStock entries, often missing the unitPrice
@@ -97,6 +108,7 @@ def build_performance_section(
     records = compute_performance_records(statement)
     lookup = sector_lookup or SectorLookup.noop()
     opening_by_isin = opening_by_isin or {}
+    asset_class_by_isin = asset_class_by_isin or {}
 
     # Map ISIN → closing market value CHF from the curated positions list
     # (which already benefits from OpenPosition fallback for un-Kursliste'd
@@ -177,14 +189,22 @@ def build_performance_section(
         perf_positions, key=lambda p: p.currency or "?",
     )
 
-    # Portfolio-level P&L is the closing value minus opening minus net
-    # deposits. This nets out dividends/fees (already reflected in closing)
-    # and is the denominator-independent numerator for the Dietz return.
-    portfolio_pnl_chf = closing_value_chf - opening_value_chf - net_deposits_chf
+    # Securities-only P&L: sum of per-position P&L lines (already includes
+    # dividends, realized + unrealized capital changes). Equivalently:
+    # closing_sec + sells + dividends - opening_sec - buys.
+    securities_buys_chf = sum((p.buys_chf for p in perf_positions), ZERO)
+    securities_sells_chf = sum((p.sells_chf for p in perf_positions), ZERO)
+    securities_net_flow_chf = securities_buys_chf - securities_sells_chf
+    portfolio_pnl_chf = sum((p.total_pnl_chf for p in perf_positions), ZERO)
     summary = _build_summary(
-        opening_value_chf=opening_value_chf,
-        closing_value_chf=closing_value_chf,
+        opening_securities_chf=opening_securities_chf,
+        closing_securities_chf=closing_securities_chf,
+        closing_cash_chf=closing_cash_chf,
+        cash_known=cash_known,
         net_deposits_chf=net_deposits_chf,
+        deposits_gross_chf=deposits_gross_chf,
+        withdrawals_chf=withdrawals_chf,
+        securities_net_flow_chf=securities_net_flow_chf,
         total_pnl_chf=portfolio_pnl_chf,
         dividends_chf=dividends_chf,
         interest_chf=interest_chf,
@@ -204,28 +224,40 @@ def build_performance_section(
 
 def _build_summary(
     *,
-    opening_value_chf: Decimal,
-    closing_value_chf: Decimal,
+    opening_securities_chf: Decimal,
+    closing_securities_chf: Decimal,
+    closing_cash_chf: Decimal,
+    cash_known: bool,
     net_deposits_chf: Decimal,
+    deposits_gross_chf: Decimal,
+    withdrawals_chf: Decimal,
+    securities_net_flow_chf: Decimal,
     total_pnl_chf: Decimal,
     dividends_chf: Decimal,
     interest_chf: Decimal,
     fees_chf: Decimal,
 ) -> PerformanceSummary:
     simple_return = None
-    if opening_value_chf > 0:
-        simple_return = (total_pnl_chf / opening_value_chf * HUNDRED).quantize(Decimal("0.01"))
+    if opening_securities_chf > 0:
+        simple_return = (total_pnl_chf / opening_securities_chf * HUNDRED).quantize(Decimal("0.01"))
 
-    # Modified Dietz: P&L / (opening + 0.5 × net deposits)
-    dietz_denom = opening_value_chf + (net_deposits_chf / 2)
+    # Modified Dietz on the security portfolio: external flows are the net
+    # buy-vs-sell movements (cash → securities or vice versa). Dividends are
+    # treated as part of the return, not a flow.
+    dietz_denom = opening_securities_chf + (securities_net_flow_chf / 2)
     money_weighted = None
     if dietz_denom > 0:
         money_weighted = (total_pnl_chf / dietz_denom * HUNDRED).quantize(Decimal("0.01"))
 
     return PerformanceSummary(
-        opening_value_chf=opening_value_chf,
-        closing_value_chf=closing_value_chf,
+        opening_value_chf=opening_securities_chf,
+        closing_value_chf=closing_securities_chf,
+        closing_cash_chf=closing_cash_chf,
+        cash_known=cash_known,
         net_deposits_chf=net_deposits_chf,
+        deposits_gross_chf=deposits_gross_chf,
+        withdrawals_chf=withdrawals_chf,
+        securities_net_flow_chf=securities_net_flow_chf,
         total_pnl_chf=total_pnl_chf,
         dividends_chf=dividends_chf,
         interest_chf=interest_chf,

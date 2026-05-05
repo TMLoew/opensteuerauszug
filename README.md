@@ -15,9 +15,13 @@ This is Tristan's fork ([TMLoew/opensteuerauszug](https://github.com/TMLoew/open
 
 **This fork adds:**
 - A new CLI subcommand `steuerauszug tax-overview` that emits three artifacts per run: an xlsx workbook, a self-contained HTML dashboard, and a one-page PDF cover (see [docs/tax_overview.md](docs/tax_overview.md))
-- A **Kanton SG Wertschriftenverzeichnis** mapping sheet with columns ready to paste into the canton's form
+- A **Kanton SG Wertschriftenverzeichnis** mapping sheet, with column A/B classification driven by ISIN domicile (CH/LI → A, foreign → B) so it transfers 1:1 onto Formular 2
 - A **DA-1 Hilfstabelle** for foreign withholding-tax reclaim with treaty-rate ceilings applied
 - A **Vermögenszuwachs waterfall** that reconciles opening + inflows − outflows = closing value within ±CHF 1 against the ESTV Kursliste Steuerwert
+- A **Performance dashboard** (HTML, PDF page 2, xlsx Performance sheet) with per-position P&L, sector / currency allocation, and benchmark comparison (SPI / SMI / SPX / MSCI World) — securities-only Modified-Dietz return, computed independently of unknown opening cash
+- Native **embedded charts** (BarChart, PieChart) in the xlsx Performance sheet so Excel/LibreOffice render the same visuals as the HTML
+- **Year-over-year linking** via `--prior-year-input <path>`: the prior year's Kursliste-derived closing values become the current year's opening, eliminating the "earliest mutation price" trap when broker exports omit `startingCash` and per-mutation FX
+- A sticky **HTML dashboard nav** with section anchors and per-section counts so reviewers can jump between Übersicht, Performance, Wertschriften, SG-Verzeichnis, DA-1, etc. in one document
 - A preparer-only **ESTV Kreisschreiben Nr. 36** (gewerbsmässiger Wertschriftenhandel) self-check, gated behind `--preparer-mode` so non-preparer exports are safe to hand to a tax clerk
 - A committed synthetic [sample HTML dashboard](docs/samples/tax_overview/sample_dashboard.html) regenerable via `scripts/generate_tax_overview_samples.py`
 
@@ -86,7 +90,8 @@ steuerauszug tax-overview \
   --input data/ibkr_2025.xml \
   --broker ibkr \
   --year 2025 \
-  --output-dir out/
+  --output-dir out/ \
+  --prior-year-input data/ibkr_2024.xml   # optional, anchors opening to prior Kursliste
 ```
 
 Key properties:
