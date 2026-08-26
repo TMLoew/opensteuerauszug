@@ -1,22 +1,23 @@
 import logging
-import os
 import typer
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, cast
 from datetime import date, datetime
 from pypdf import PdfReader, PdfWriter
 
-from opensteuerauszug.config.models import SchwabAccountSettings, IbkrAccountSettings, GeneralSettings # Added GeneralSettings
-from opensteuerauszug.render.translations import DEFAULT_LANGUAGE
+from .config.models import (
+    SchwabAccountSettings,
+    IbkrAccountSettings,
+    FidelityAccountSettings,
+    DegiroAccountSettings,
+)
+from .render.translations import DEFAULT_LANGUAGE
 from .core.identifier_loader import SecurityIdentifierMapLoader
 
-# Use the generated eCH-0196 model
 from .model.ech0196 import TaxStatement, Client, ClientNumber, Institution
-# Import the rendering functionality
 from .render.render import render_tax_statement
-# Import calculation framework
 from .calculate.base import CalculationMode
 from .calculate.total import TotalCalculator
 from .calculate.cleanup import CleanupCalculator
@@ -24,32 +25,40 @@ from .calculate.minimal_tax_value import MinimalTaxValueCalculator
 from .calculate.kursliste_tax_value_calculator import KurslisteTaxValueCalculator
 from .calculate.fill_in_tax_value_calculator import FillInTaxValueCalculator
 from .calculate.payment_reconciliation_calculator import PaymentReconciliationCalculator
+from .calculate.withholding_cap_calculator import WithholdingCapCalculator
 from .util.known_issues import is_known_issue
-from .importers.schwab.schwab_importer import SchwabImporter
-from .importers.ibkr.ibkr_importer import IbkrImporter # Added IbkrImporter
 from .core.exchange_rate_provider import ExchangeRateProvider
-from .core.kursliste_manager import KurslisteManager
-from .core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
 from .core.flag_override_provider import FlagOverrideProvider
 from .core.manual_price_provider import ManualPriceProvider
+from .core.kursliste_manager import KurslisteManager
+from .core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
 from .config import ConfigManager, ConcreteAccountSettings
 from .config.paths import (
     resolve_config_file,
     resolve_kursliste_dir,
     resolve_security_identifiers_file,
 )
+from .kursliste.__main__ import app as kursliste_app
+from typer.main import TyperGroup
 
 logger = logging.getLogger(__name__)
 
-app = typer.Typer(
-    help="""
-OpenSteuerAuszug - Swiss Tax Statement Generator
 
-Generate Swiss tax statements (eCH-0196 format) from broker statements.
-Supports IBKR and Schwab brokers with automatic Kursliste integration.
-    """,
-    add_completion=False,
-)
+class DefaultToProcess(TyperGroup):
+    def parse_args(self, ctx, args):
+        if args and args[0] not in self.commands and not args[0].startswith('-'):
+            args.insert(0, 'process')
+        return super().parse_args(ctx, args)
+
+
+app = typer.Typer(cls=DefaultToProcess)
+app.add_typer(kursliste_app, name="kursliste")
+
+# Register the tax-overview subcommand (defined in its own module to keep the
+# tax_overview package self-contained and testable in isolation).
+from .render.tax_overview.cli import tax_overview_command  # noqa: E402
+
+app.command(name="tax-overview")(tax_overview_command)
 
 
 @app.callback(invoke_without_command=True)
@@ -60,6 +69,7 @@ def _root_callback(
     """If -g/--gui is passed, launch the GUI and exit immediately."""
     if gui:
         from opensteuerauszug.util.gui_launcher import main as _launch
+
         raise typer.Exit(code=_launch())
     # No -g: let Typer continue to the invoked subcommand.
     # If no subcommand was given either, show the help.
@@ -76,16 +86,26 @@ class Phase(str, Enum):
     RECONCILE_PAYMENTS = "reconcile-payments"
     RENDER = "render"
 
+
 class ImporterType(str, Enum):
     SCHWAB = "schwab"
-    IBKR = "ibkr" # Added IBKR
+    IBKR = "ibkr"
+    FIDELITY = "fidelity"
+    DEGIRO = "degiro"
     NONE = "none"
+
 
 class TaxCalculationLevel(str, Enum):
     NONE = "none"
     MINIMAL = "minimal"
     KURSLISTE = "kursliste"
     FILL_IN = "fillin"
+
+
+class UseBrokerWithholding(str, Enum):
+    OFF = "off"
+    CAP = "cap"
+
 
 class LogLevel(str, Enum):
     DEBUG = "DEBUG"
@@ -94,13 +114,18 @@ class LogLevel(str, Enum):
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
 
-default_phases = [Phase.IMPORT, Phase.VALIDATE, Phase.CALCULATE, Phase.RECONCILE_PAYMENTS, Phase.RENDER]
 
+default_phases = [
+    Phase.IMPORT,
+    Phase.VALIDATE,
+    Phase.CALCULATE,
+    Phase.RECONCILE_PAYMENTS,
+    Phase.RENDER,
+]
 
-# Register the tax-overview subcommand (defined in its own module to keep the
-# tax_overview package self-contained and testable in isolation).
-from .render.tax_overview import tax_overview_command  # noqa: E402
-app.command(name="tax-overview")(tax_overview_command)
+_COMMAND_DEFAULT_PHASES = {
+    'verify': [Phase.VERIFY],
+}
 
 
 @app.command(name="info")
@@ -223,54 +248,150 @@ MORE HELP
 """
     print(help_text)
 
-@app.command()
-def main(
-    input_file: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=True, readable=True, help="Input file (specific format depends on importer, or XML for raw) or directory (for Schwab importer)."),
+
+@app.command("process")
+def process(
+    ctx: typer.Context,
+    input_file: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Input file (specific format depends on importer, or XML for raw) or directory (for Schwab importer).",
+    ),
     output_file: Path = typer.Option(None, "--output", "-o", help="Output PDF file path."),
-    run_phases_input: List[Phase] = typer.Option(None, "--phases", "-p", help="Phases to run (default: all). Specify multiple times or comma-separated."),
-    debug_dump_path: Optional[Path] = typer.Option(None, "--debug-dump", help="Directory to dump intermediate model state after each phase (as XML)."),
-    final_xml_path: Optional[Path] = typer.Option(None, "--xml-output", help="Write the final tax statement XML to this file."),
-    raw_import: bool = typer.Option(False, "--raw-import", help="Import directly from XML model dump instead of using an importer."),
-    importer_type: ImporterType = typer.Option(ImporterType.NONE, "--importer", help="Specify the importer to use."),
-    period_from_str: Optional[str] = typer.Option(None, "--period-from", help="Start date of the tax period (YYYY-MM-DD), required for some importers like Schwab."),
-    period_to_str: Optional[str] = typer.Option(None, "--period-to", help="End date of the tax period (YYYY-MM-DD), required for some importers like Schwab."),
-    tax_year: Optional[int] = typer.Option(None, "--tax-year", help="Specify the tax year (e.g., 2023). If provided, period-from and period-to will default to the start/end of this year unless explicitly set. If period-from/to are set, they must fall within this tax year."),
+    run_phases_input: List[Phase] = typer.Option(
+        None,
+        "--phases",
+        "-p",
+        help="Phases to run (default: all). Specify multiple times or comma-separated.",
+    ),
+    debug_dump_path: Optional[Path] = typer.Option(
+        None,
+        "--debug-dump",
+        help="Directory to dump intermediate model state after each phase (as XML).",
+    ),
+    final_xml_path: Optional[Path] = typer.Option(
+        None, "--xml-output", help="Write the final tax statement XML to this file."
+    ),
+    raw_import: bool = typer.Option(
+        False,
+        "--raw-import",
+        help="Import directly from XML model dump instead of using an importer.",
+    ),
+    importer_type: ImporterType = typer.Option(
+        ImporterType.NONE, "--importer", help="Specify the importer to use."
+    ),
+    period_from_str: Optional[str] = typer.Option(
+        None,
+        "--period-from",
+        help="Start date of the tax period (YYYY-MM-DD), required for some importers like Schwab and Fidelity.",
+    ),
+    period_to_str: Optional[str] = typer.Option(
+        None,
+        "--period-to",
+        help="End date of the tax period (YYYY-MM-DD), required for some importers like Schwab and Fidelity.",
+    ),
+    tax_year: Optional[int] = typer.Option(
+        None,
+        "--tax-year",
+        help="Specify the tax year (e.g., 2023). If provided, period-from and period-to will default to the start/end of this year unless explicitly set. If period-from/to are set, they must fall within this tax year.",
+    ),
     identifiers_csv_path_opt: Optional[str] = typer.Option(
         None,
         "--identifiers-csv-path",
-        help="Path to the security identifiers CSV file (e.g., data/my_identifiers.csv). If not provided, defaults to 'data/security_identifiers.csv' in CWD or XDG config home."
+        help="Path to the security identifiers CSV file (e.g., data/my_identifiers.csv). If not provided, defaults to 'data/security_identifiers.csv' in CWD or XDG config home.",
     ),
-    strict_consistency_flag: bool = typer.Option(True, "--strict-consistency/--no-strict-consistency", help="Enable/disable strict consistency checks in importers (e.g., Schwab). Defaults to strict."),
-    filter_to_period_flag: bool = typer.Option(True, "--filter-to-period/--no-filter-to-period", help="Filter transactions and stock events to the tax period (with closing balances). Defaults to enabled."),
-    tax_calculation_level: TaxCalculationLevel = typer.Option(TaxCalculationLevel.KURSLISTE, "--tax-calculation-level", help="Specify the level of detail for tax value calculations."),
-    log_level: LogLevel = typer.Option(LogLevel.INFO, "--log-level", help="Set the log level for console output."),
-    config_file: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to the configuration TOML file. Defaults to config.toml in CWD or XDG config home."),
-    broker_name: Optional[str] = typer.Option(None, "--broker", help="Broker name (e.g., 'schwab') from config.toml to use for this run."),
-    override_configs: List[str] = typer.Option(None, "--set", help="Override configuration settings using path.to.key=value format. Can be used multiple times."),
-    kursliste_dir: Optional[Path] = typer.Option(None, "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. Defaults to 'data/kursliste' in CWD or XDG data home."),
-    org_nr: Optional[str] = typer.Option(None, "--org-nr", help="Override the organization number used in barcodes (5-digit number)"),
-    institution_name: Optional[str] = typer.Option(None, "--institution-name", help="Override the institution name (e.g., 'LYNX B.V.'). Takes precedence over config.toml setting."),
-    payment_reconciliation: bool = typer.Option(True, "--payment-reconciliation/--no-payment-reconciliation", help="Run optional payment reconciliation between Kursliste and broker evidence."),
-    pre_amble: Optional[List[Path]] = typer.Option(None, "--pre-amble", help="List of PDF documents to add before the main steuerauszug."),
-    post_amble: Optional[List[Path]] = typer.Option(None, "--post-amble", help="List of PDF documents to add after the main steuerauszug."),
+    strict_consistency_flag: bool = typer.Option(
+        True,
+        "--strict-consistency/--no-strict-consistency",
+        help="Enable/disable strict consistency checks in importers (e.g., Schwab). Defaults to strict.",
+    ),
+    filter_to_period_flag: bool = typer.Option(
+        True,
+        "--filter-to-period/--no-filter-to-period",
+        help="Filter transactions and stock events to the tax period (with closing balances). Defaults to enabled.",
+    ),
+    tax_calculation_level: TaxCalculationLevel = typer.Option(
+        TaxCalculationLevel.KURSLISTE,
+        "--tax-calculation-level",
+        help="Specify the level of detail for tax value calculations.",
+    ),
+    log_level: LogLevel = typer.Option(
+        LogLevel.INFO, "--log-level", help="Set the log level for console output."
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to the configuration TOML file. Defaults to config.toml in CWD or XDG config home.",
+    ),
+    broker_name: Optional[str] = typer.Option(
+        None, "--broker", help="Broker name (e.g., 'schwab') from config.toml to use for this run."
+    ),
+    override_configs: List[str] = typer.Option(
+        None,
+        "--set",
+        help="Override configuration settings using path.to.key=value format. Can be used multiple times.",
+    ),
+    kursliste_dir: Optional[Path] = typer.Option(
+        None,
+        "--kursliste-dir",
+        help="Directory containing Kursliste XML files for exchange rate information. Defaults to 'data/kursliste' in CWD or XDG data home.",
+    ),
+    org_nr: Optional[str] = typer.Option(
+        None, "--org-nr", help="Override the organization number used in barcodes (5-digit number)"
+    ),
+    institution_name: Optional[str] = typer.Option(
+        None,
+        "--institution-name",
+        help="Override the institution name (e.g., 'LYNX B.V.'). Takes precedence over config.toml setting.",
+    ),
+    payment_reconciliation: bool = typer.Option(
+        True,
+        "--payment-reconciliation/--no-payment-reconciliation",
+        help="Run optional payment reconciliation between Kursliste and broker evidence.",
+    ),
+    corrections_flex: Optional[List[Path]] = typer.Option(
+        None,
+        "--corrections-flex",
+        help="IBKR Flex Query XML file(s) covering the post-year-end period (e.g. Jan–Mar of the following year). Only withholding-tax CashTransactions whose settleDate falls within the tax period are imported, allowing 1042-S corrections to be netted.",
+    ),
+    use_broker_withholding: UseBrokerWithholding = typer.Option(
+        UseBrokerWithholding.CAP,
+        "--use-broker-withholding",
+        help="Control how broker withholding evidence is used: OFF disables adjustments, CAP (default) caps Kursliste (Q) withholding at the broker's effective level.",
+    ),
+    pre_amble: Optional[List[Path]] = typer.Option(
+        None, "--pre-amble", help="List of PDF documents to add before the main steuerauszug."
+    ),
+    post_amble: Optional[List[Path]] = typer.Option(
+        None, "--post-amble", help="List of PDF documents to add after the main steuerauszug."
+    ),
 ):
     """Processes financial data to generate a Swiss tax statement (Steuerauszug)."""
     logging.basicConfig(level=log_level.value)
     # Suppress pypdf warnings to avoid cluttering output with benign warnings
     # about rotated text and other PDF layout issues
     logging.getLogger('pypdf').setLevel(logging.ERROR)
-    sys.stdout.reconfigure(line_buffering=True)  # Ensure stdout is line-buffered for mixing with logging
-    
-    phases_specified_by_user = run_phases_input is not None
-    run_phases = run_phases_input if phases_specified_by_user else default_phases[:]
+    reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure_stdout):
+        reconfigure_stdout(
+            line_buffering=True
+        )  # Ensure stdout is line-buffered for mixing with logging
 
-    if payment_reconciliation and Phase.RECONCILE_PAYMENTS not in run_phases:
-        render_idx = run_phases.index(Phase.RENDER) if Phase.RENDER in run_phases else len(run_phases)
-        run_phases.insert(render_idx, Phase.RECONCILE_PAYMENTS)
-    elif not payment_reconciliation and Phase.RECONCILE_PAYMENTS in run_phases:
-        run_phases.remove(Phase.RECONCILE_PAYMENTS)
+    phases_specified_by_user = (
+        run_phases_input is not None or ctx.info_name in _COMMAND_DEFAULT_PHASES
+    )
+    if run_phases_input is not None:
+        run_phases = run_phases_input
+    else:
+        run_phases = _COMMAND_DEFAULT_PHASES.get(ctx.info_name or "", default_phases[:])
+        if not payment_reconciliation and Phase.RECONCILE_PAYMENTS in run_phases:
+            run_phases.remove(Phase.RECONCILE_PAYMENTS)
 
-    print(f"Starting OpenSteuerauszug processing...")
+    print("Starting OpenSteuerauszug processing...")
     print(f"Input file: {input_file}")
     # ... (rest of initial print statements and date parsing logic remains the same) ...
     parsed_period_from: Optional[date] = None
@@ -281,14 +402,18 @@ def main(
         try:
             temp_period_from = datetime.strptime(period_from_str, "%Y-%m-%d").date()
         except ValueError:
-            raise typer.BadParameter(f"Invalid date format for --period-from: '{period_from_str}'. Expected YYYY-MM-DD.")
+            raise typer.BadParameter(
+                f"Invalid date format for --period-from: '{period_from_str}'. Expected YYYY-MM-DD."
+            )
 
     temp_period_to: Optional[date] = None
     if period_to_str:
         try:
             temp_period_to = datetime.strptime(period_to_str, "%Y-%m-%d").date()
         except ValueError:
-            raise typer.BadParameter(f"Invalid date format for --period-to: '{period_to_str}'. Expected YYYY-MM-DD.")
+            raise typer.BadParameter(
+                f"Invalid date format for --period-to: '{period_to_str}'. Expected YYYY-MM-DD."
+            )
 
     if tax_year:
         print(f"Tax year specified: {tax_year}")
@@ -297,7 +422,9 @@ def main(
 
         if temp_period_from:
             if temp_period_from.year != tax_year:
-                raise typer.BadParameter(f"--period-from date '{temp_period_from}' is not within the specified --tax-year '{tax_year}'.")
+                raise typer.BadParameter(
+                    f"--period-from date '{temp_period_from}' is not within the specified --tax-year '{tax_year}'."
+                )
             parsed_period_from = temp_period_from
             logger.debug(f"Using explicit --period-from: {parsed_period_from}")
         else:
@@ -306,7 +433,9 @@ def main(
 
         if temp_period_to:
             if temp_period_to.year != tax_year:
-                raise typer.BadParameter(f"--period-to date '{temp_period_to}' is not within the specified --tax-year '{tax_year}'.")
+                raise typer.BadParameter(
+                    f"--period-to date '{temp_period_to}' is not within the specified --tax-year '{tax_year}'."
+                )
             parsed_period_to = temp_period_to
             logger.debug(f"Using explicit --period-to: {parsed_period_to}")
         else:
@@ -321,98 +450,171 @@ def main(
             logger.debug(f"Using explicit --period-to: {parsed_period_to}")
 
     if parsed_period_from and parsed_period_to and parsed_period_from > parsed_period_to:
-        raise typer.BadParameter(f"--period-from '{parsed_period_from}' cannot be after --period-to '{parsed_period_to}'.")
+        raise typer.BadParameter(
+            f"--period-from '{parsed_period_from}' cannot be after --period-to '{parsed_period_to}'."
+        )
 
     if parsed_period_from and parsed_period_to:
         print(f"Tax period: {parsed_period_from} to {parsed_period_to}")
     # ... (rest of date printing)
 
+    # Optional providers, constructed in the CALCULATE phase; initialized here
+    # so phase subsets (e.g. verify-only) reference a defined name.
+    flag_override_provider: Optional[FlagOverrideProvider] = None
+    manual_price_provider: Optional[ManualPriceProvider] = None
+
     # --- Configuration Loading ---
+    all_fidelity_account_settings_models: List[FidelityAccountSettings] = []
     all_schwab_account_settings_models: List[SchwabAccountSettings] = []
-    all_ibkr_account_settings_models: List[IbkrAccountSettings] = [] # New list for IBKR
+    all_ibkr_account_settings_models: List[IbkrAccountSettings] = []
+    all_degiro_account_settings_models: List[DegiroAccountSettings] = []
     effective_config_file = resolve_config_file(config_file)
     config_manager = ConfigManager(config_file_path=str(effective_config_file))
-    
-    # Extract general configuration settings for CleanupCalculator
-    general_config_settings: Optional[GeneralSettings] = None
+
+    general_settings_data = config_manager.get_general_settings_dict(overrides=override_configs)
+    general_config_settings = config_manager.resolve_general_settings(overrides=override_configs)
+    experimental_importers_enabled = (
+        general_config_settings.experimental_importers if general_config_settings else False
+    )
+
+    # --- Validation of Importer Type based on experimental flag ---
+    if not experimental_importers_enabled:
+        if importer_type not in [
+            ImporterType.SCHWAB,
+            ImporterType.IBKR,
+            ImporterType.DEGIRO,
+            ImporterType.NONE,
+        ]:
+            raise typer.BadParameter(
+                f"Importer '{importer_type.value}' is experimental and requires 'experimental_importers = true' in configuration (general section) to be used."
+            )
+
     try:
-        if config_manager.general_settings:
-            # Create GeneralSettings instance from the loaded configuration
-            temp_general_settings = dict(config_manager.general_settings)
-            
-            # Apply CLI overrides to general settings if any
-            if override_configs:
-                # Create a temporary dict to apply overrides to general settings
-                temp_config = {"general": config_manager.general_settings.copy()}
-                temp_config = config_manager._apply_cli_overrides(temp_config, override_configs)
-                temp_general_settings = temp_config.get("general", {})
-            
-            # Create the GeneralSettings Pydantic model
-            general_config_settings = GeneralSettings(**temp_general_settings)
-            
-            print(f"Loaded general configuration settings: canton={general_config_settings.canton}, full_name={general_config_settings.full_name}, language={general_config_settings.language}")
-        else:
-            print("No general configuration settings found.")
-    except Exception as e:
-        print(f"Warning: Error loading general configuration settings: {e}")
-        general_config_settings = None
+        calculate_settings = config_manager.resolve_calculate_settings(overrides=override_configs)
+    except ValueError as e:
+        print(f"Error loading configuration: {e}")
+        raise typer.Exit(code=1)
+
+    # Keep render options available even if full GeneralSettings validation fails.
+    render_language = general_settings_data.get("language", DEFAULT_LANGUAGE)
+    minimal_frontpage_placeholder_setting = general_settings_data.get(
+        "minimal_uses_placeholder_frontpage",
+        True,
+    )
 
     target_broker_kind_for_config_loading = None
+    if importer_type == ImporterType.FIDELITY:
+        target_broker_kind_for_config_loading = "fidelity"
     if importer_type == ImporterType.SCHWAB:
         target_broker_kind_for_config_loading = "schwab"
     elif importer_type == ImporterType.IBKR:
         target_broker_kind_for_config_loading = "ibkr"
+    elif importer_type == ImporterType.DEGIRO:
+        target_broker_kind_for_config_loading = "degiro"
     elif broker_name:
         target_broker_kind_for_config_loading = broker_name.lower()
-        print(f"Warning: --broker '{broker_name}' used with importer '{importer_type.value}'. Account settings will be loaded for '{target_broker_kind_for_config_loading}', ensure this is intended.")
+        print(
+            f"Warning: --broker '{broker_name}' used with importer '{importer_type.value}'. Account settings will be loaded for '{target_broker_kind_for_config_loading}', ensure this is intended."
+        )
 
     if target_broker_kind_for_config_loading:
         try:
-            logger.debug(f"Loading all account configurations for broker kind '{target_broker_kind_for_config_loading}' from '{config_file}'...")
+            logger.debug(
+                f"Loading all account configurations for broker kind '{target_broker_kind_for_config_loading}' from '{config_file}'..."
+            )
             if override_configs:
                 logger.debug(f"Applying CLI overrides: {override_configs}")
 
             concrete_accounts_list = config_manager.get_all_account_settings_for_broker(
-                target_broker_kind_for_config_loading,
-                overrides=override_configs
+                target_broker_kind_for_config_loading, overrides=override_configs
             )
-            
+
             if not concrete_accounts_list:
-                print(f"No accounts configured for broker kind '{target_broker_kind_for_config_loading}' in {config_file}. Importer will proceed with defaults if possible.")
+                print(
+                    f"No accounts configured for broker kind '{target_broker_kind_for_config_loading}' in {config_file}. Importer will proceed with defaults if possible."
+                )
 
             for acc_settings in concrete_accounts_list:
-                if acc_settings.kind == "schwab":
-                    all_schwab_account_settings_models.append(acc_settings.settings)
+                if acc_settings.kind == "fidelity":
+                    all_fidelity_account_settings_models.append(
+                        cast(FidelityAccountSettings, acc_settings.settings)
+                    )
+                elif acc_settings.kind == "schwab":
+                    all_schwab_account_settings_models.append(
+                        cast(SchwabAccountSettings, acc_settings.settings)
+                    )
                 elif acc_settings.kind == "ibkr":
-                    all_ibkr_account_settings_models.append(acc_settings.settings)
+                    all_ibkr_account_settings_models.append(
+                        cast(IbkrAccountSettings, acc_settings.settings)
+                    )
+                elif acc_settings.kind == "degiro":
+                    all_degiro_account_settings_models.append(
+                        cast(DegiroAccountSettings, acc_settings.settings)
+                    )
                 else:
-                    print(f"Warning: Received unhandled account configuration kind '{acc_settings.kind}' for broker '{target_broker_kind_for_config_loading}'. Skipping.")
-            
-            if target_broker_kind_for_config_loading == "schwab" and not all_schwab_account_settings_models and concrete_accounts_list:
-                raise ValueError(f"No valid Schwab account configurations found for broker 'schwab', though other configurations might exist.")
-            if target_broker_kind_for_config_loading == "ibkr" and not all_ibkr_account_settings_models and concrete_accounts_list:
-                logger.debug(f"Warning: No valid IBKR account configurations loaded for broker 'ibkr', though other configurations might exist.")
+                    print(
+                        f"Warning: Received unhandled account configuration kind '{acc_settings.kind}' for broker '{target_broker_kind_for_config_loading}'. Skipping."
+                    )
+            if (
+                target_broker_kind_for_config_loading == "fidelity"
+                and not all_fidelity_account_settings_models
+                and concrete_accounts_list
+            ):
+                raise ValueError(
+                    "No valid Fidelity account configurations found for broker 'fidelity', though other configurations might exist."
+                )
+            if (
+                target_broker_kind_for_config_loading == "schwab"
+                and not all_schwab_account_settings_models
+                and concrete_accounts_list
+            ):
+                raise ValueError(
+                    "No valid Schwab account configurations found for broker 'schwab', though other configurations might exist."
+                )
+            if (
+                target_broker_kind_for_config_loading == "ibkr"
+                and not all_ibkr_account_settings_models
+                and concrete_accounts_list
+            ):
+                logger.debug(
+                    "Warning: No valid IBKR account configurations loaded for broker 'ibkr', though other configurations might exist."
+                )
 
+            if all_fidelity_account_settings_models:
+                print(
+                    f"Successfully loaded {len(all_fidelity_account_settings_models)} Fidelity account(s)."
+                )
             if all_schwab_account_settings_models:
-                print(f"Successfully loaded {len(all_schwab_account_settings_models)} Schwab account(s).")
+                print(
+                    f"Successfully loaded {len(all_schwab_account_settings_models)} Schwab account(s)."
+                )
             if all_ibkr_account_settings_models:
-                print(f"Successfully loaded {len(all_ibkr_account_settings_models)} IBKR account(s).")
+                print(
+                    f"Successfully loaded {len(all_ibkr_account_settings_models)} IBKR account(s)."
+                )
+            if all_degiro_account_settings_models:
+                print(
+                    f"Successfully loaded {len(all_degiro_account_settings_models)} Degiro account(s)."
+                )
 
         except ValueError as e:
             print(f"Error loading configuration: {e}")
             raise typer.Exit(code=1)
     else:
-        print("No specific broker targeted by --importer or --broker for detailed configuration loading. Proceeding with general setup.")
-
+        print(
+            "No specific broker targeted by --importer or --broker for detailed configuration loading. Proceeding with general setup."
+        )
 
     # This variable is used later for Schwab Importer instantiation
-    account_settings: Optional[ConcreteAccountSettings] = None # Retain for now, as Schwab Importer instantiation still uses it.
-                                                              # This will be addressed in the next step.
-                                                              # For this step, we focus on populating all_schwab_account_settings_models.
-                                                              # If Schwab importer is used, the old account_settings will be effectively ignored
-                                                              # as all_schwab_account_settings_models takes precedence in logic flow.
+    account_settings: Optional[ConcreteAccountSettings] = (
+        None  # Retain for now, as Schwab Importer instantiation still uses it.
+    )
+    # This will be addressed in the next step.
+    # For this step, we focus on populating all_schwab_account_settings_models.
+    # If Schwab importer is used, the old account_settings will be effectively ignored
+    # as all_schwab_account_settings_models takes precedence in logic flow.
 
-    statement: Optional[TaxStatement] = None # Now refers to TaxStatement
+    statement: Optional[TaxStatement] = None  # Now refers to TaxStatement
 
     def dump_debug_model(current_phase_str: str, model: TaxStatement):
         if debug_dump_path and model:
@@ -428,13 +630,17 @@ def main(
         # ... (raw_import logic remains the same) ...
         if Phase.IMPORT in run_phases:
             if phases_specified_by_user:
-                 print("Warning: --phases includes 'import' but --raw-import is active. Loading directly from XML.")
+                print(
+                    "Warning: --phases includes 'import' but --raw-import is active. Loading directly from XML."
+                )
             run_phases = [p for p in run_phases if p != Phase.IMPORT]
 
         print(f"Raw importing model from: {input_file}")
         try:
             if not input_file.is_file():
-                raise typer.BadParameter(f"Raw import requires a file, but got a directory: {input_file}")
+                raise typer.BadParameter(
+                    f"Raw import requires a file, but got a directory: {input_file}"
+                )
             statement = TaxStatement.from_xml_file(str(input_file))
             print("Raw import complete.")
             dump_debug_model("raw_import", statement)
@@ -445,17 +651,25 @@ def main(
         if not phases_specified_by_user:
             run_phases = []
 
-        if not any(p in run_phases for p in [Phase.VALIDATE, Phase.CALCULATE, Phase.VERIFY, Phase.RECONCILE_PAYMENTS, Phase.RENDER]):
-             print("No further phases selected after raw import. Exiting.")
-             return
-        
+        if not any(
+            p in run_phases
+            for p in [
+                Phase.VALIDATE,
+                Phase.CALCULATE,
+                Phase.VERIFY,
+                Phase.RECONCILE_PAYMENTS,
+                Phase.RENDER,
+            ]
+        ):
+            print("No further phases selected after raw import. Exiting.")
+            return
+
         if not parsed_period_from:
             parsed_period_from = statement.periodFrom
         if not parsed_period_to:
             parsed_period_to = statement.periodTo
         if not tax_year:
             tax_year = statement.taxPeriod
-
 
     current_phase = None
     try:
@@ -464,30 +678,76 @@ def main(
             print(f"Phase: {current_phase.value}")
             if importer_type == ImporterType.SCHWAB:
                 if not parsed_period_from or not parsed_period_to:
-                    raise typer.BadParameter("--period-from and --period-to are required for the Schwab importer.")
+                    raise typer.BadParameter(
+                        "--period-from and --period-to are required for the Schwab importer."
+                    )
                 if not input_file.is_dir():
-                    raise typer.BadParameter(f"Input for Schwab importer must be a directory, but got: {input_file}")
+                    raise typer.BadParameter(
+                        f"Input for Schwab importer must be a directory, but got: {input_file}"
+                    )
                 if not all_schwab_account_settings_models:
-                    print(f"Error: No valid Schwab account configurations loaded/found for broker 'schwab'. Check config.toml or provide --broker schwab if settings are under a different name.")
+                    print(
+                        "Error: No valid Schwab account configurations loaded/found for broker 'schwab'. Check config.toml or provide --broker schwab if settings are under a different name."
+                    )
                     raise typer.Exit(code=1)
-                print(f"Initializing SchwabImporter with {len(all_schwab_account_settings_models)} Schwab account configuration(s).")
+                print(
+                    f"Initializing SchwabImporter with {len(all_schwab_account_settings_models)} Schwab account configuration(s)."
+                )
+                from .importers.schwab.schwab_importer import SchwabImporter
+
                 schwab_importer = SchwabImporter(
                     period_from=parsed_period_from,
                     period_to=parsed_period_to,
                     account_settings_list=all_schwab_account_settings_models,
-                    strict_consistency=strict_consistency_flag
+                    strict_consistency=strict_consistency_flag,
+                    render_language=render_language,
                 )
                 statement = schwab_importer.import_dir(str(input_file))
-                print(f"Schwab import complete.")
+                print("Schwab import complete.")
+
+            elif importer_type == ImporterType.FIDELITY:
+                if not parsed_period_from or not parsed_period_to:
+                    raise typer.BadParameter(
+                        "--period-from and --period-to are required for the Fidelity importer."
+                    )
+                if not input_file.is_dir():
+                    raise typer.BadParameter(
+                        f"Input for Fidelity importer must be a directory, but got: {input_file}"
+                    )
+                if not all_fidelity_account_settings_models:
+                    print(
+                        "Error: No valid Fidelity account configurations loaded/found for broker 'fidelity'. Check config.toml or provide --broker fidelity if settings are under a different name."
+                    )
+                    raise typer.Exit(code=1)
+                print(
+                    f"Initializing FidelityImporter with {len(all_fidelity_account_settings_models)} Fidelity account configuration(s)."
+                )
+                from .importers.fidelity.fidelity_importer import FidelityImporter
+
+                fidelity_importer = FidelityImporter(
+                    period_from=parsed_period_from,
+                    period_to=parsed_period_to,
+                    account_settings_list=all_fidelity_account_settings_models,
+                    strict_consistency=strict_consistency_flag,
+                    render_language=render_language,
+                )
+                statement = fidelity_importer.import_dir(str(input_file))
+                print("Fidelity import complete.")
 
             elif importer_type == ImporterType.IBKR:
                 if not parsed_period_from or not parsed_period_to:
-                    raise typer.BadParameter("--period-from and --period-to are required for the IBKR importer.")
+                    raise typer.BadParameter(
+                        "--period-from and --period-to are required for the IBKR importer."
+                    )
                 if not input_file.is_file():
-                    raise typer.BadParameter(f"Input for IBKR importer must be an XML file, but got: {input_file}")
+                    raise typer.BadParameter(
+                        f"Input for IBKR importer must be an XML file, but got: {input_file}"
+                    )
 
                 if not all_ibkr_account_settings_models:
-                    print("No specific IBKR account settings found/loaded from config. Using empty list for importer settings.")
+                    print(
+                        "No specific IBKR account settings found/loaded from config. Using empty list for importer settings."
+                    )
 
                 # Enable tolerance for unknown XML attributes so that new
                 # fields added by Interactive Brokers don't break parsing.
@@ -496,50 +756,93 @@ def main(
                 # rather than at module level so that tests remain strict by
                 # default.  See: https://github.com/vroonhof/opensteuerauszug/issues/48
                 import ibflex
+
                 ibflex.enable_unknown_attribute_tolerance()
 
-                print(f"Initializing IbkrImporter with {len(all_ibkr_account_settings_models)} IBKR account configuration(s) (if any).")
+                print(
+                    f"Initializing IbkrImporter with {len(all_ibkr_account_settings_models)} IBKR account configuration(s) (if any)."
+                )
+                from .importers.ibkr.ibkr_importer import IbkrImporter
+
                 ibkr_importer = IbkrImporter(
                     period_from=parsed_period_from,
                     period_to=parsed_period_to,
-                    account_settings_list=all_ibkr_account_settings_models
+                    account_settings_list=all_ibkr_account_settings_models,
+                    render_language=render_language,
                 )
-                statement = ibkr_importer.import_files([str(input_file)])
-                print(f"IBKR import complete.")
+                corrections_files = [str(p) for p in corrections_flex] if corrections_flex else None
+                statement = ibkr_importer.import_files(
+                    [str(input_file)], corrections_filenames=corrections_files
+                )
+                print("IBKR import complete.")
+
+            elif importer_type == ImporterType.DEGIRO:
+                if not parsed_period_from or not parsed_period_to:
+                    raise typer.BadParameter(
+                        "--period-from and --period-to are required for the Degiro importer."
+                    )
+                if not input_file.is_dir():
+                    raise typer.BadParameter(
+                        f"Input for Degiro importer must be a directory, but got: {input_file}"
+                    )
+                if not all_degiro_account_settings_models:
+                    print(
+                        "No specific Degiro account settings found/loaded from config. Using empty list for importer settings."
+                    )
+                print(
+                    f"Initializing DegiroImporter with {len(all_degiro_account_settings_models)} Degiro account configuration(s)."
+                )
+                from .importers.degiro.degiro_importer import DegiroImporter
+
+                degiro_importer = DegiroImporter(
+                    period_from=parsed_period_from,
+                    period_to=parsed_period_to,
+                    account_settings_list=all_degiro_account_settings_models,
+                )
+                statement = degiro_importer.import_dir(str(input_file))
+                print("Degiro import complete.")
 
             elif importer_type == ImporterType.NONE and not raw_import:
-                print("No specific importer selected, creating an empty TaxStatement for further processing.")
+                print(
+                    "No specific importer selected, creating an empty TaxStatement for further processing."
+                )
                 # Create a minimal valid statement with required elements per eCH-0196 XSD
                 statement = TaxStatement(
                     minorVersion=22,
                     institution=Institution(name=""),
-                    client=[Client(clientNumber=ClientNumber(""))]
+                    client=[Client(clientNumber=ClientNumber(""))],
                 )
             else:
                 # This case implies an importer was specified but isn't handled yet,
                 # or raw_import is true (which is handled before this block).
                 # If more importers are added, they need to be handled here.
-                print(f"Importer '{importer_type.value}' not yet implemented or not applicable. Creating empty TaxStatement.")
+                print(
+                    f"Importer '{importer_type.value}' not yet implemented or not applicable. Creating empty TaxStatement."
+                )
                 # Create a minimal valid statement with required elements per eCH-0196 XSD
                 statement = TaxStatement(
                     minorVersion=22,
                     institution=Institution(name=""),
-                    client=[Client(clientNumber=ClientNumber(""))]
+                    client=[Client(clientNumber=ClientNumber(""))],
                 )
 
-            print(f"Import successful." )
+            print("Import successful.")
             dump_debug_model(current_phase.value, statement)
 
         if Phase.CALCULATE in run_phases:
             current_phase = Phase.CALCULATE
             print(f"Phase: {current_phase.value}")
             if not statement:
-                 raise ValueError("TaxStatement model not loaded. Cannot run calculate phase.")
-            
+                raise ValueError("TaxStatement model not loaded. Cannot run calculate phase.")
+
             if not parsed_period_from or not parsed_period_to:
-                raise ValueError("Both --period-from and --period-to must be specified for the calculate phase.")
-            
-            effective_identifiers_csv_path = resolve_security_identifiers_file(identifiers_csv_path_opt)
+                raise ValueError(
+                    "Both --period-from and --period-to must be specified for the calculate phase."
+                )
+
+            effective_identifiers_csv_path = resolve_security_identifiers_file(
+                identifiers_csv_path_opt
+            )
             logger.debug(f"Using security identifiers CSV path: {effective_identifiers_csv_path}")
 
             print(f"Attempting to load security identifiers from: {effective_identifiers_csv_path}")
@@ -551,41 +854,6 @@ def main(
             else:
                 print("Security identifier map not loaded or empty. Enrichment will be skipped.")
 
-            # Initialize FlagOverrideProvider to handle Kursliste sign overrides
-            flag_override_provider = None
-            try:
-                flag_override_provider = FlagOverrideProvider(
-                    config_path=str(config_file),
-                    identifiers_path=str(effective_identifiers_csv_path)
-                )
-                print("FlagOverrideProvider initialized successfully.")
-            except Exception as e:
-                print(f"Warning: Could not initialize FlagOverrideProvider: {e}")
-
-            # Initialize ManualPriceProvider to handle manual price overrides
-            manual_price_provider = None
-            # Compute manual prices CSV path in the data directory
-            cli_py_file_path = os.path.abspath(__file__)
-            src_opensteuerauszug_dir = os.path.dirname(cli_py_file_path)
-            src_dir = os.path.dirname(src_opensteuerauszug_dir)
-            project_root_dir = os.path.dirname(src_dir)
-            manual_prices_dir = os.path.join(project_root_dir, "data")
-
-            # Determine the tax year for loading year-specific manual prices
-            effective_tax_year = tax_year if tax_year else (parsed_period_to.year if parsed_period_to else None)
-
-            try:
-                manual_price_provider = ManualPriceProvider(
-                    csv_path=manual_prices_dir,
-                    tax_year=effective_tax_year
-                )
-                if effective_tax_year:
-                    print(f"ManualPriceProvider initialized for tax year {effective_tax_year}.")
-                else:
-                    print("ManualPriceProvider initialized (no tax year specified).")
-            except Exception as e:
-                print(f"Warning: Could not initialize ManualPriceProvider: {e}")
-
             print("Running CleanupCalculator...")
             cleanup_calculator = CleanupCalculator(
                 period_from=parsed_period_from,
@@ -594,11 +862,16 @@ def main(
                 enable_filtering=filter_to_period_flag,
                 importer_name=importer_type.value,
                 override_org_nr=org_nr,
-                config_settings=general_config_settings
+                config_settings=general_config_settings,
+                render_language=render_language,
             )
             statement = cleanup_calculator.calculate(statement)
-            print(f"CleanupCalculator finished. Summary: Modified fields count: {len(cleanup_calculator.modified_fields)}")
-            dump_debug_model(current_phase.value + "_after_cleanup", statement) # Optional intermediate dump
+            print(
+                f"CleanupCalculator finished. Summary: Modified fields count: {len(cleanup_calculator.modified_fields)}"
+            )
+            dump_debug_model(
+                current_phase.value + "_after_cleanup", statement
+            )  # Optional intermediate dump
 
             exchange_rate_provider: ExchangeRateProvider
             effective_kursliste_dir = resolve_kursliste_dir(kursliste_dir)
@@ -608,88 +881,192 @@ def main(
                     print(f"Warning: Kursliste directory {effective_kursliste_dir} does not exist")
                 kursliste_manager = KurslisteManager()
                 kursliste_manager.load_directory(effective_kursliste_dir)
-                
+
                 # Verify that Kursliste data exists for the required tax year
                 required_tax_year = parsed_period_to.year
                 kursliste_manager.ensure_year_available(required_tax_year, effective_kursliste_dir)
-                
+
                 exchange_rate_provider = KurslisteExchangeRateProvider(kursliste_manager)
             except Exception as e:
-                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider with directory {effective_kursliste_dir}: {e}")
-            
+                raise ValueError(
+                    f"Failed to initialize KurslisteExchangeRateProvider with directory {effective_kursliste_dir}: {e}"
+                )
+
+            # Initialize FlagOverrideProvider to handle Kursliste sign overrides
+            try:
+                flag_override_provider = FlagOverrideProvider(
+                    config_path=str(effective_config_file),
+                    identifiers_path=str(effective_identifiers_csv_path),
+                )
+                print("FlagOverrideProvider initialized successfully.")
+            except Exception as e:
+                print(f"Warning: Could not initialize FlagOverrideProvider: {e}")
+
+            # Initialize ManualPriceProvider to handle manual price overrides
+            manual_prices_dir = Path(__file__).resolve().parents[2] / "data"
+            # Determine the tax year for loading year-specific manual prices
+            effective_tax_year = (
+                tax_year if tax_year else (parsed_period_to.year if parsed_period_to else None)
+            )
+            try:
+                manual_price_provider = ManualPriceProvider(
+                    csv_path=str(manual_prices_dir), tax_year=effective_tax_year
+                )
+                if effective_tax_year:
+                    print(f"ManualPriceProvider initialized for tax year {effective_tax_year}.")
+                else:
+                    print("ManualPriceProvider initialized (no tax year specified).")
+            except Exception as e:
+                print(f"Warning: Could not initialize ManualPriceProvider: {e}")
+
             tax_value_calculator: Optional[MinimalTaxValueCalculator] = None
             calculator_name = ""
 
             if tax_calculation_level == TaxCalculationLevel.MINIMAL:
                 print("Running MinimalTaxValueCalculator...")
                 calculator_name = "MinimalTaxValueCalculator"
-                tax_value_calculator = MinimalTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_calculator = MinimalTaxValueCalculator(
+                    mode=CalculationMode.OVERWRITE,
+                    exchange_rate_provider=exchange_rate_provider,
+                    keep_existing_payments=calculate_settings.keep_existing_payments,
+                )
             elif tax_calculation_level == TaxCalculationLevel.KURSLISTE:
                 print("Running KurslisteTaxValueCalculator...")
                 calculator_name = "KurslisteTaxValueCalculator"
-                tax_value_calculator = KurslisteTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, flag_override_provider=flag_override_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_calculator = KurslisteTaxValueCalculator(
+                    mode=CalculationMode.OVERWRITE,
+                    exchange_rate_provider=exchange_rate_provider,
+                    flag_override_provider=flag_override_provider,
+                    keep_existing_payments=calculate_settings.keep_existing_payments,
+                    render_language=render_language,
+                )
             elif tax_calculation_level == TaxCalculationLevel.FILL_IN:
                 print("Running FillInTaxValueCalculator...")
                 calculator_name = "FillInTaxValueCalculator"
-                tax_value_calculator = FillInTaxValueCalculator(mode=CalculationMode.OVERWRITE, exchange_rate_provider=exchange_rate_provider, flag_override_provider=flag_override_provider, manual_price_provider=manual_price_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
-            
+                tax_value_calculator = FillInTaxValueCalculator(
+                    mode=CalculationMode.OVERWRITE,
+                    exchange_rate_provider=exchange_rate_provider,
+                    flag_override_provider=flag_override_provider,
+                    manual_price_provider=manual_price_provider,
+                    keep_existing_payments=calculate_settings.keep_existing_payments,
+                    render_language=render_language,
+                )
+
             if tax_value_calculator and calculator_name:
                 statement = tax_value_calculator.calculate(statement)
-                print(f"{calculator_name} finished. Modified fields: {len(tax_value_calculator.modified_fields) if tax_value_calculator.modified_fields else '0'}, Errors: {len(tax_value_calculator.errors)}")
-                dump_debug_model(current_phase.value + f"_after_{calculator_name.lower()}", statement)
+                print(
+                    f"{calculator_name} finished. Modified fields: {len(tax_value_calculator.modified_fields) if tax_value_calculator.modified_fields else '0'}, Errors: {len(tax_value_calculator.errors)}"
+                )
+                dump_debug_model(
+                    current_phase.value + f"_after_{calculator_name.lower()}", statement
+                )
             elif tax_calculation_level != TaxCalculationLevel.NONE:
-                print(f"Warning: Tax calculation level '{tax_calculation_level.value}' was specified but no corresponding calculator was run.")
+                print(
+                    f"Warning: Tax calculation level '{tax_calculation_level.value}' was specified but no corresponding calculator was run."
+                )
             else:
-                print(f"Tax calculation level set to '{tax_calculation_level.value}', skipping detailed tax value calculation step.")
+                print(
+                    f"Tax calculation level set to '{tax_calculation_level.value}', skipping detailed tax value calculation step."
+                )
 
-            # --- 3. Run TotalCalculator (or other main calculators) ---
+            # --- 3. Cap withholding to broker level (if enabled) ---
+            if use_broker_withholding == UseBrokerWithholding.CAP:
+                print("Running WithholdingCapCalculator...")
+                cap_calculator = WithholdingCapCalculator()
+                statement = cap_calculator.calculate(statement)
+                if cap_calculator.capped_securities:
+                    for sec_name, dates in cap_calculator.capped_securities.items():
+                        print(
+                            f"  Capped withholding for {sec_name} on {', '.join(str(d) for d in dates)}"
+                        )
+                dump_debug_model(current_phase.value + "_after_withholding_cap", statement)
+
+            # --- 4. Run TotalCalculator (or other main calculators) ---
             # Ensure statement is not None after cleanup, though cleanup should always return it
             if not statement:
-                raise ValueError("TaxStatement became None after cleanup phase. This should not happen.")
+                raise ValueError(
+                    "TaxStatement became None after cleanup phase. This should not happen."
+                )
             calculator = TotalCalculator(mode=CalculationMode.OVERWRITE)
-            
+
             # Apply calculations
             statement = calculator.calculate(statement)
-            print(f"TotalCalculator finished. Modified fields: {len(calculator.modified_fields) if calculator.modified_fields else '0'}")
+            print(
+                f"TotalCalculator finished. Modified fields: {len(calculator.modified_fields) if calculator.modified_fields else '0'}"
+            )
             dump_debug_model(current_phase.value, statement)
 
         if Phase.VERIFY in run_phases:
             current_phase = Phase.VERIFY
             print(f"Phase: {current_phase.value}")
             if not statement:
-                 raise ValueError("TaxStatement model not loaded. Cannot run calculate phase.")
-            
+                raise ValueError("TaxStatement model not loaded. Cannot run calculate phase.")
+
             print(f"Verifying with tax calculation level: {tax_calculation_level.value}...")
             exchange_rate_provider_verify: ExchangeRateProvider
             effective_kursliste_dir = resolve_kursliste_dir(kursliste_dir)
-            print(f"Using KurslisteExchangeRateProvider with directory: {effective_kursliste_dir} for verification")
+            print(
+                f"Using KurslisteExchangeRateProvider with directory: {effective_kursliste_dir} for verification"
+            )
             try:
                 if not effective_kursliste_dir.exists():
-                    print(f"Warning: Kursliste directory {effective_kursliste_dir} does not exist for verification.")
+                    print(
+                        f"Warning: Kursliste directory {effective_kursliste_dir} does not exist for verification."
+                    )
                     effective_kursliste_dir.mkdir(parents=True, exist_ok=True)
                 kursliste_manager_verify = KurslisteManager()
                 kursliste_manager_verify.load_directory(effective_kursliste_dir)
-                
+
                 # Verify that Kursliste data exists for the required tax year
-                required_tax_year_verify = statement.taxPeriod if statement.taxPeriod else parsed_period_to.year
-                kursliste_manager_verify.ensure_year_available(required_tax_year_verify, effective_kursliste_dir)
-                
-                exchange_rate_provider_verify = KurslisteExchangeRateProvider(kursliste_manager_verify)
+                if statement.taxPeriod:
+                    required_tax_year_verify = statement.taxPeriod
+                elif parsed_period_to is not None:
+                    required_tax_year_verify = parsed_period_to.year
+                else:
+                    raise typer.BadParameter(
+                        "Verify phase requires either statement.taxPeriod to be set or a --period-to argument."
+                    )
+                kursliste_manager_verify.ensure_year_available(
+                    required_tax_year_verify, effective_kursliste_dir
+                )
+
+                exchange_rate_provider_verify = KurslisteExchangeRateProvider(
+                    kursliste_manager_verify
+                )
             except Exception as e:
-                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider for verification with directory {effective_kursliste_dir}: {e}")
-            
+                raise ValueError(
+                    f"Failed to initialize KurslisteExchangeRateProvider for verification with directory {effective_kursliste_dir}: {e}"
+                )
+
             tax_value_verifier: Optional[MinimalTaxValueCalculator] = None
             verifier_name = ""
 
             if tax_calculation_level == TaxCalculationLevel.MINIMAL:
                 verifier_name = "MinimalTaxValueCalculator"
-                tax_value_verifier = MinimalTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_verifier = MinimalTaxValueCalculator(
+                    mode=CalculationMode.VERIFY,
+                    exchange_rate_provider=exchange_rate_provider_verify,
+                    keep_existing_payments=calculate_settings.keep_existing_payments,
+                )
             elif tax_calculation_level == TaxCalculationLevel.KURSLISTE:
                 verifier_name = "KurslisteTaxValueCalculator"
-                tax_value_verifier = KurslisteTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, flag_override_provider=flag_override_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_verifier = KurslisteTaxValueCalculator(
+                    mode=CalculationMode.VERIFY,
+                    exchange_rate_provider=exchange_rate_provider_verify,
+                    flag_override_provider=flag_override_provider,
+                    keep_existing_payments=calculate_settings.keep_existing_payments,
+                    render_language=render_language,
+                )
             elif tax_calculation_level == TaxCalculationLevel.FILL_IN:
                 verifier_name = "FillInTaxValueCalculator"
-                tax_value_verifier = FillInTaxValueCalculator(mode=CalculationMode.VERIFY, exchange_rate_provider=exchange_rate_provider_verify, flag_override_provider=flag_override_provider, manual_price_provider=manual_price_provider, keep_existing_payments=config_manager.calculate_settings.keep_existing_payments)
+                tax_value_verifier = FillInTaxValueCalculator(
+                    mode=CalculationMode.VERIFY,
+                    exchange_rate_provider=exchange_rate_provider_verify,
+                    flag_override_provider=flag_override_provider,
+                    manual_price_provider=manual_price_provider,
+                    keep_existing_payments=calculate_settings.keep_existing_payments,
+                    render_language=render_language,
+                )
 
             if tax_value_verifier and verifier_name:
                 print(f"Running {verifier_name} (Verify Mode)...")
@@ -699,18 +1076,24 @@ def main(
                         f"{verifier_name} (Verify Mode) encountered {len(tax_value_verifier.errors)} errors:"
                     )
                     for error in tax_value_verifier.errors:
-                        prefix = "Known" if is_known_issue(error, statement.institution) else "Error"
+                        prefix = (
+                            "Known" if is_known_issue(error, statement.institution) else "Error"
+                        )
                         print(f"  {prefix}: {error}")
                 else:
                     print(f"{verifier_name} (Verify Mode) found no errors.")
             elif tax_calculation_level != TaxCalculationLevel.NONE:
-                print(f"Warning: Tax calculation level '{tax_calculation_level.value}' was specified but no corresponding verifier was run.")
+                print(
+                    f"Warning: Tax calculation level '{tax_calculation_level.value}' was specified but no corresponding verifier was run."
+                )
             else:
-                print(f"Tax calculation level set to '{tax_calculation_level.value}', skipping detailed tax value verification step.")
+                print(
+                    f"Tax calculation level set to '{tax_calculation_level.value}', skipping detailed tax value verification step."
+                )
 
             calculator = TotalCalculator(mode=CalculationMode.VERIFY)
             calculator.calculate(statement)
-            
+
             if calculator.errors:
                 print(f"Encountered {len(calculator.errors)} fields during calculation")
                 for error in calculator.errors:
@@ -723,15 +1106,21 @@ def main(
             current_phase = Phase.RECONCILE_PAYMENTS
             print(f"Phase: {current_phase.value}")
             if not statement:
-                raise ValueError("TaxStatement model not loaded. Cannot run payment reconciliation phase.")
+                raise ValueError(
+                    "TaxStatement model not loaded. Cannot run payment reconciliation phase."
+                )
 
-            reconciliation_calculator = PaymentReconciliationCalculator()
+            reconciliation_calculator = PaymentReconciliationCalculator(
+                tolerance_chf=calculate_settings.tolerance,
+                allow_above_treaty_withholding=calculate_settings.allow_above_treaty_withholding,
+            )
             statement = reconciliation_calculator.calculate(statement)
             report = statement.payment_reconciliation_report
             if report:
                 print(
                     "Payment reconciliation complete: "
                     f"matches={report.match_count}, "
+                    f"capped={report.capped_count}, "
                     f"expected-missing={report.expected_missing_count}, "
                     f"mismatches={report.mismatch_count}"
                 )
@@ -745,11 +1134,15 @@ def main(
                             if row.broker_dividend_amount is not None:
                                 broker_div_chf = row.broker_dividend_amount * row.exchange_rate
                                 div_diff_chf = broker_div_chf - row.kursliste_dividend_chf
-                                div_diff_orig = row.broker_dividend_amount - (row.kursliste_dividend_chf / row.exchange_rate)
+                                div_diff_orig = row.broker_dividend_amount - (
+                                    row.kursliste_dividend_chf / row.exchange_rate
+                                )
                             if row.broker_withholding_amount is not None:
                                 broker_wht_chf = row.broker_withholding_amount * row.exchange_rate
                                 wht_diff_chf = broker_wht_chf - row.kursliste_withholding_chf
-                                wht_diff_orig = row.broker_withholding_amount - (row.kursliste_withholding_chf / row.exchange_rate)
+                                wht_diff_orig = row.broker_withholding_amount - (
+                                    row.kursliste_withholding_chf / row.exchange_rate
+                                )
 
                         print(
                             f"  MISMATCH {row.country} {row.security} {row.payment_date}: "
@@ -758,7 +1151,8 @@ def main(
                             f"Broker wht {row.broker_withholding_amount} {row.broker_withholding_currency}; "
                             f"dCHF(div={div_diff_chf}, wht={wht_diff_chf}); "
                             f"dORIG(div={div_diff_orig} {row.broker_dividend_currency}, "
-                            f"wht={wht_diff_orig} {row.broker_withholding_currency})"
+                            f"wht={wht_diff_orig} {row.broker_withholding_currency}), "
+                            f"note: {row.note}"
                         )
 
             dump_debug_model(current_phase.value, statement)
@@ -767,29 +1161,29 @@ def main(
             current_phase = Phase.VALIDATE
             print(f"Phase: {current_phase.value}")
             if not statement:
-                 raise ValueError("TaxStatement model not loaded. Cannot run validate phase.")
+                raise ValueError("TaxStatement model not loaded. Cannot run validate phase.")
             statement.validate_model()
-            print(f"Validation successful.")
+            print("Validation successful.")
             dump_debug_model(current_phase.value, statement)
 
         if Phase.RENDER in run_phases:
             current_phase = Phase.RENDER
             print(f"Phase: {current_phase.value}")
             if not statement:
-                 raise ValueError("TaxStatement model not loaded. Cannot run render phase.")
+                raise ValueError("TaxStatement model not loaded. Cannot run render phase.")
             if not output_file:
-                 raise ValueError("Output file path must be specified for the render phase.")
+                raise ValueError("Output file path must be specified for the render phase.")
 
             # Fill in missing fields to make rendering possible
             calculator = TotalCalculator(mode=CalculationMode.FILL)
             statement = calculator.calculate(statement)
-            print(f"Calculation successful.")
+            print("Calculation successful.")
             dump_debug_model(current_phase.value, statement)
-            
+
             if org_nr is not None:
                 if not isinstance(org_nr, str) or not org_nr.isdigit() or len(org_nr) != 5:
                     raise ValueError(f"Invalid --org-nr '{org_nr}': Must be a 5-digit string.")
-            
+
             # Determine the path for the main tax statement PDF
             # If we are merging, render to a temp file first
             main_pdf_path = output_file
@@ -803,26 +1197,18 @@ def main(
                 override_org_nr=org_nr,
                 minimal_frontpage_placeholder=(
                     (tax_calculation_level == TaxCalculationLevel.MINIMAL)
-                    and (
-                        general_config_settings.minimal_uses_placeholder_frontpage
-                        if general_config_settings
-                        else True
-                    )
+                    and minimal_frontpage_placeholder_setting
                 ),
                 institution_name_override=(
                     institution_name  # Command-line takes precedence
                     if institution_name
                     else (
                         general_config_settings.institution_name
-                        if general_config_settings and hasattr(general_config_settings, 'institution_name')
+                        if general_config_settings
                         else None
                     )
                 ),
-                language=(
-                    general_config_settings.language
-                    if general_config_settings
-                    else DEFAULT_LANGUAGE
-                ),
+                language=render_language,
             )
             print(f"Rendering successful to {rendered_path}")
 
@@ -871,6 +1257,8 @@ def main(
                             print(f"Warning: Failed to delete temporary file {rendered_path}: {e}")
 
         if final_xml_path:
+            if statement is None:
+                raise ValueError("TaxStatement model not loaded. Cannot write final XML output.")
             try:
                 statement.to_xml_file(str(final_xml_path))
                 print(f"Final XML written to {final_xml_path}")
@@ -884,6 +1272,7 @@ def main(
         print(f"Error during phase {current_phase.value if current_phase else 'startup'}: {e}")
         print("Stack trace:")
         import traceback
+
         traceback.print_exc(limit=20)
         if statement and debug_dump_path:
             error_phase_str = f"{current_phase.value}_error" if current_phase else "startup_error"
@@ -892,6 +1281,9 @@ def main(
             except Exception as dump_e:
                 print(f"Failed to dump debug model after error: {dump_e}")
         raise typer.Exit(code=1)
+
+
+app.command("verify")(process)
 
 if __name__ == "__main__":
     app()

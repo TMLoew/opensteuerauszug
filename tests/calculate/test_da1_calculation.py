@@ -18,13 +18,17 @@ from opensteuerauszug.model.kursliste import (
     Share,
     SecurityGroupESTV,
 )
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE
+
 
 def test_da1_calculation_with_q_sign(kursliste_manager, monkeypatch):
     """
     Test that a security with a (Q) sign payment is treated as a share for DA-1 calculation.
     """
     provider = KurslisteExchangeRateProvider(kursliste_manager)
-    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+    calc = KurslisteTaxValueCalculator(
+        mode=CalculationMode.FILL, exchange_rate_provider=provider, render_language=DEFAULT_LANGUAGE
+    )
 
     # Mock a Kursliste security with a (Q) sign payment
     kl_sec = Share(
@@ -44,7 +48,7 @@ def test_da1_calculation_with_q_sign(kursliste_manager, monkeypatch):
                 exchangeRate=Decimal("0.9"),
                 sign="(Q)",
             )
-        ]
+        ],
     )
 
     # Provide a DA-1 rate via a patched accessor method instead of mutating the
@@ -114,12 +118,15 @@ def test_da1_calculation_with_q_sign(kursliste_manager, monkeypatch):
     assert payment.nonRecoverableTaxPercent == Decimal("0")
     assert payment.nonRecoverableTaxAmount == Decimal("0")
 
+
 def test_da1_calculation_for_share(kursliste_manager, monkeypatch):
     """
     Test DA-1 calculation for a regular share.
     """
     provider = KurslisteExchangeRateProvider(kursliste_manager)
-    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+    calc = KurslisteTaxValueCalculator(
+        mode=CalculationMode.FILL, exchange_rate_provider=provider, render_language=DEFAULT_LANGUAGE
+    )
 
     kl_sec = Share(
         id=2,
@@ -137,7 +144,7 @@ def test_da1_calculation_for_share(kursliste_manager, monkeypatch):
                 paymentValueCHF=Decimal("4.8"),
                 exchangeRate=Decimal("0.96"),
             )
-        ]
+        ],
     )
 
     accessor = kursliste_manager.get_kurslisten_for_year(2024)
@@ -212,7 +219,9 @@ def test_da1_calculation_v_sign_handled(kursliste_manager):
     it's treated as a regular dividend for tax purposes.
     """
     provider = KurslisteExchangeRateProvider(kursliste_manager)
-    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+    calc = KurslisteTaxValueCalculator(
+        mode=CalculationMode.FILL, exchange_rate_provider=provider, render_language=DEFAULT_LANGUAGE
+    )
 
     kl_sec = Share(
         id=3,
@@ -232,7 +241,7 @@ def test_da1_calculation_v_sign_handled(kursliste_manager):
                 sign="(V)",
                 withHoldingTax=False,  # No withholding tax like Hong Kong dividends
             )
-        ]
+        ],
     )
 
     sec = Security(

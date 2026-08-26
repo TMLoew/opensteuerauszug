@@ -5,9 +5,9 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QEvent, QProcess, QSettings, Qt, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
-from PySide6.QtWidgets import (
+from PySide6.QtCore import QDate, QEvent, QProcess, QSettings, Qt, QUrl  # type: ignore
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette  # type: ignore
+from PySide6.QtWidgets import (  # type: ignore
     QApplication,
     QCheckBox,
     QComboBox,

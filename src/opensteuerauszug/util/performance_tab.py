@@ -7,9 +7,9 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, List, Optional
 
-from PySide6.QtCore import QDate, QThread, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
+from PySide6.QtCore import QDate, QThread, Signal  # type: ignore
+from PySide6.QtGui import QColor  # type: ignore
+from PySide6.QtWidgets import (  # type: ignore
     QDateEdit,
     QGroupBox,
     QHBoxLayout,
@@ -431,7 +431,7 @@ class PerformanceTab(QWidget):
 
         # ── Wire ─────────────────────────────────────────────────────────
         self._analyze_btn.clicked.connect(self._run_analysis)
-        self._main.tax_year_spin.valueChanged.connect(self._on_tax_year_changed)
+        self._main.tax_year_spin.valueChanged.connect(self._on_tax_year_changed)  # type: ignore
         self._symbol_filter.textChanged.connect(self._apply_filter)
 
     # ------------------------------------------------------------------
@@ -455,8 +455,8 @@ class PerformanceTab(QWidget):
             self._table.setRowHidden(row, not match)
 
     def _run_analysis(self) -> None:
-        input_path: str = self._main.input_path_edit.text().strip()
-        broker: str = self._main.importer_combo.currentData()
+        input_path: str = self._main.input_path_edit.text().strip()  # type: ignore
+        broker: str = self._main.importer_combo.currentData()  # type: ignore
         qf = self._from_edit.date()
         period_from = date(qf.year(), qf.month(), qf.day())
         qd = self._cutoff_edit.date()

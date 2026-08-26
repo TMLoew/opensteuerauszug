@@ -4,8 +4,6 @@ import datetime as dt
 from datetime import date, datetime
 from decimal import Decimal
 
-import pytest
-
 from opensteuerauszug.calculate.base import CalculationMode
 from opensteuerauszug.calculate.kursliste_tax_value_calculator import KurslisteTaxValueCalculator
 from opensteuerauszug.core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
@@ -91,9 +89,7 @@ def _make_base_kursliste(shares=None):
 def _make_provider(kursliste):
     """Wrap a Kursliste into a KurslisteExchangeRateProvider."""
     manager = KurslisteManager()
-    manager.kurslisten[2024] = KurslisteAccessor(
-        data_source=[kursliste], tax_year=2024
-    )
+    manager.kurslisten[2024] = KurslisteAccessor(data_source=[kursliste], tax_year=2024)
     return KurslisteExchangeRateProvider(manager)
 
 

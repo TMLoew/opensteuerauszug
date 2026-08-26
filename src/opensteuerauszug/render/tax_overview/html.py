@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Optional
+from typing import Any, Dict, Optional, cast
 
 from jinja2 import Environment
 
@@ -580,7 +580,9 @@ _INCOME_TABLE_MACRO = """\
 
 def _build_environment() -> Environment:
     env = Environment(autoescape=True, trim_blocks=True, lstrip_blocks=True)
-    env.globals.update(
+    # jinja2 types the default globals narrowly; widen before adding our helpers.
+    env_globals = cast(Dict[str, Any], env.globals)
+    env_globals.update(
         fmt_chf=format_chf,
         fmt_num=format_number,
         fmt_percent=format_percent,
@@ -599,7 +601,7 @@ def render_html(data: TaxOverviewData) -> str:
     env = _build_environment()
     # Register the income-row macro as a global so the main template can call it.
     macro_module = env.from_string(_INCOME_TABLE_MACRO).module
-    env.globals["income_table"] = macro_module.income_table
+    env.globals["income_table"] = getattr(macro_module, "income_table")
 
     # Pre-render SVGs so the template just embeds them (keeps Jinja clean).
     if data.performance:

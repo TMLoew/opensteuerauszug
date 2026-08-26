@@ -33,6 +33,7 @@ Bug reports for the tax-overview mode or SG-specific behaviour belong in this fo
 - The main focus is on getting core transaction and interest data
 - These need to be verified by the user before submitting with the tax return
 - Tax values are computed best effort for informational purposes (the main Tax software should be able to compute it from the core transaction data)
+- The [standalone web app](docs/webapp.md)'s browser wizard is a separate, mostly AI-coded UI layer and has seen much less real-world testing than the Python/CLI version. Prefer the CLI if you can install it.
 
 For more information on required due diligence see the [User Guide](docs/user_guide.md).
 
@@ -65,7 +66,9 @@ See [GUI_GUIDE.md](GUI_GUIDE.md) for detailed GUI documentation.
 
 ### Command Line Interface
 
-After installing, see the [User Guide](docs/user_guide.md) for preparation steps, how to get broker data and run the command.
+After installing, use the [User Guide](docs/user_guide.md) as the main
+walkthrough. It covers quick start, preparation steps, broker data export,
+and complete command examples.
 
 **Security note:**
 - Keep personal settings in a local file such as `config.local.toml` and select it in GUI Expert mode (or CLI `--config config.local.toml`)
@@ -159,7 +162,11 @@ For now the focus is on brokers / banks that the author has
 
 - Charles Schwab (main trading account and Equity Awards)
 - Interactive Brokers
-  
+
+Thanks to community contributions we also support
+
+- DEGIRO (contributed by [@manuelgr0](https://github.com/manuelgr0), with multilingual support by [@dalpozz](https://github.com/dalpozz) and [@VincentBlondeau](https://github.com/VincentBlondeau))
+
 Additionally we can recalculate and verify any existing steuerauszug (this is mostly to increase confidence in the software itself)
 
 ## Related work and alternatives
@@ -174,7 +181,13 @@ The [EWV](https://www.ewv-ete.ch/de/ewv-ete/) and SSK publish a [shared set of t
 
 ## Installation
 
-Requires **Python 3.10** or newer.
+### Standalone web app (no installation)
+
+OpenSteuerAuszug also runs as a **single HTML page in your browser** — open
+**<https://vroonhof.github.io/opensteuerauszug/>** and a wizard guides you
+through the steps (or save the page locally and open it from disk). Your
+financial data never leaves your computer. See the
+[web app guide](docs/webapp.md) for details.
 
 This needs newer versions of pdf417gen and (for testing) pdf417decoder than
 are available on PyPI — these are pulled in from vroonhof's vendored git branches
@@ -182,35 +195,45 @@ automatically. The fork's tax-overview mode additionally pulls in `openpyxl`
 (xlsx workbook export) and `jinja2` (HTML dashboard rendering); both are
 declared in `pyproject.toml` so regular `pip install` picks them up.
 
-In the current development phase it is best to install direct from git. e.g.
+### Quick install (recommended for users)
 
-```console
-# Clone this fork
-git clone https://github.com/TMLoew/opensteuerauszug.git
 
-# Navigate into the cloned directory
-cd opensteuerauszug
+# One-time install of the CLI via uv
+```console 
+uv tool install --from git+https://github.com/vroonhof/opensteuerauszug.git opensteuerauszug
 
-# --- Virtual Environment Setup ---
-# Create a virtual environment
-python3 -m venv .venv
-
-# Activate the virtual environment
-# On macOS and Linux:
-source .venv/bin/activate
-
-# On Windows (use this command instead):
-# .venv\Scripts\activate
-
-# --- Install the package ---
-# Install the package and its dependencies using pip
-# The '.' indicates to install the package from the current directory
-# The '[dev]' part is optional and installs development dependencies as well
-pip install .[dev]
-
+# Then run normally (without pixi, or after . ./scripts/setup_pixi.sh)
+opensteuerauszug --help
 ```
 
-This package needs a needs newer version of pdf417gen and (for testing) pdf417decoder than available on PyPY. Either install them directly from git ot use my vendored branches (e.g. `git+https://github.com/vroonhof/pdf417-py.git`)
+Install `uv` first: https://docs.astral.sh/uv/getting-started/installation/
+
+`uv` can also install/manage Python for you, so you usually do not need a
+separate Python setup step.
+
+For one-off runs without installing the tool, you can also use:
+
+```console
+uv run --with git+https://github.com/vroonhof/opensteuerauszug.git opensteuerauszug --help
+```
+
+Then continue with the [User Guide](docs/user_guide.md).
+
+### Development install [option 1] (contributors: using uv)
+
+For development and tests, install from source:
+
+```console
+git clone https://github.com/vroonhof/opensteuerauszug.git
+cd opensteuerauszug
+uv sync --locked --extra dev
+```
+### Development install [option 2] (contributors: using [pixi](https://pixi.prefix.dev/latest/))
+```console
+git clone https://github.com/vroonhof/opensteuerauszug.git
+cd opensteuerauszug
+. ./scripts/setup_pixi.sh
+```
 
 ### Verifying the generated XML
 
@@ -234,22 +257,29 @@ For detailed documentation on available scripts, including the Kursliste filteri
 
 ### Setup
 
-To set up the development environment:
+To set up the locked development environment with uv:
 
 ```bash
-# Create and activate virtual environment
-python -m venv .venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+uv sync --locked --extra dev
+```
 
-# Install dependencies
-pip install -e ".[dev]"
-pip install git+https://github.com/vroonhof/pdf417decoder.git#subdirectory=python
+To set up the development environment (pixi):
+
+```bash
+. ./setup_pixi.sh
 ```
 
 ### Testing
 
 ```console
-pytest tests/
+uv run --locked --extra dev pytest tests/
+```
+
+To update all dependencies and regenerate both the uv-specific and standard
+PEP 751 lock files:
+
+```console
+./scripts/update_lockfiles.sh --upgrade
 ```
 
 If the environment variable `EXTRA_SAMPLE_DIR` points to a directory with XML files these are validated as part of a set of integration sets. See the [verify](docs/verify_existing.md) documentation for how to invoke that manually.
@@ -265,12 +295,29 @@ This project exists in part for me to try out AI based coding outside of $WORKPL
 
 That said all mistakes, hallucinations etc are probably mine.
 
+The [standalone web app](docs/webapp.md) is a particularly heavy case: the browser-side
+wizard (`web/app_template.html` and its JS) is mostly AI-generated and has had far less
+real-world exercise than the core library and CLI. Treat it as more experimental.
+
 ## Related projects
 
 - https://github.com/stefanloerwald/zh-tax-csv-import : if you want an
   automated import that controls PrivateTax directly. It is more hacky but leaves no trace for the tax office to be confused about.
 - https://github.com/BrunoEberhard/open-ech-taxstatement : An old project I only discovered later that contains a model defintion of the Tax data targeting Java. The author has since left the Swis open data efforts.
+- https://github.com/KapJI/capital-gains-calculator : UK Capital Gains Tax calculator
+  supporting Charles Schwab, Interactive Brokers, and others. Thanks to
+  [@KapJI](https://github.com/KapJI) and contributors for the comprehensive Schwab
+  transaction type coverage and sample data that helped improve our importer. Their
+  test data serves as a useful source of example inputs for many importers.
 
+
+## Acknowledgements
+
+Many thanks to everyone who has tested this tool with their own data and contributed fixes and improvements.
+
+Special thanks to [@pet-zh](https://github.com/pet-zh), whose extensive real-world testing and numerous fixes have made the output significantly more polished and reliable.
+
+The DEGIRO importer is a community effort: contributed by [@manuelgr0](https://github.com/manuelgr0), with multilingual support by [@dalpozz](https://github.com/dalpozz) and improved French support plus test data by [@VincentBlondeau](https://github.com/VincentBlondeau).
 
 ## License
 

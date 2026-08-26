@@ -362,9 +362,9 @@ def _run_pipeline(
                 general_settings = GeneralSettings(**dict(cm.general_settings))
             accounts = cm.get_all_account_settings_for_broker(broker)
             for acc in accounts or []:
-                if acc.kind == "ibkr":
+                if acc.kind == "ibkr" and isinstance(acc.settings, IbkrAccountSettings):
                     ibkr_accounts.append(acc.settings)
-                elif acc.kind == "schwab":
+                elif acc.kind == "schwab" and isinstance(acc.settings, SchwabAccountSettings):
                     schwab_accounts.append(acc.settings)
         except Exception as exc:  # pragma: no cover - config errors surface to CLI
             logger.warning("tax-overview: config load failed (%s) — continuing with defaults",

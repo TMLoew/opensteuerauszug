@@ -3,6 +3,7 @@
 canton = "SG" # Required if importer doesn't provide canton. Comment out to use importer data (e.g., IBKR flex report).
 full_name = "Tristan Maximilian Löw"
 language = "de" # Default language
+experimental_importers = false # Set to true to enable experimental importers (e.g., Fidelity)
 
 [general.processing_flags]
 detect_foreign_income = true

@@ -1,7 +1,8 @@
-from typing import Optional, Union, Literal, List, Any
-from pydantic import BaseModel, Field, field_validator, PrivateAttr
+from typing import Optional, Union, Literal, Any
+from pydantic import BaseModel, Field, field_validator
 
-from opensteuerauszug.model.ech0196 import ISINType, ValorNumber
+from .ech0196 import ISINType, ValorNumber
+
 
 class BasePosition(BaseModel):
     depot: str
@@ -11,7 +12,7 @@ class BasePosition(BaseModel):
         "arbitrary_types_allowed": True,
     }
 
-    def _comparison_key(self):
+    def _comparison_key(self) -> tuple:
         # To be overridden by subclasses for relevant fields
         return (self.depot,)
 
@@ -31,47 +32,56 @@ class BasePosition(BaseModel):
         """Returns a prefix for naming opening/closing balances (e.g., 'Cash ')."""
         raise NotImplementedError("Subclasses must implement this method.")
 
+
 class CashPosition(BasePosition):
     type: Literal["cash"] = "cash"
     currentCy: str = Field(default="USD", description="Currency code for cash position")
-    cash_account_id: Optional[str] = Field(default=None, description="Optional identifier for a specific cash account within the same depot and currency")
-    _identifier_str: Optional[str] = PrivateAttr(default=None)
+    cash_account_id: Optional[str] = Field(
+        default=None,
+        description="Optional identifier for a specific cash account within the same depot and currency",
+    )
+    is_unsettled_balance: bool = Field(
+        default=False,
+        description="If True, this position holds cash that is in-transit (T+1 settlement pending)",
+    )
 
     model_config = {
         "frozen": True,
         "arbitrary_types_allowed": True,
     }
 
-    def _comparison_key(self):
-        return (self.depot, self.currentCy, self.cash_account_id)
+    def _comparison_key(self) -> tuple:
+        return (self.depot, self.currentCy, self.cash_account_id, self.is_unsettled_balance)
 
     def get_processing_identifier(self) -> str:
-        if self._identifier_str is None:
-            self._identifier_str = f"Cash-{self.depot}-{self.cash_account_id}-{self.currentCy}"
-        return self._identifier_str
+        suffix = "-unsettled" if self.is_unsettled_balance else ""
+        return f"Cash-{self.depot}-{self.cash_account_id}-{self.currentCy}{suffix}"
 
     def get_balance_name_prefix(self) -> str:
         return "Cash "
+
 
 class SecurityPosition(BasePosition):
     """
     Security position model. Equality and hash ignore 'description' and 'security_type'.
     """
+
     type: Literal["security"] = "security"
     valor: Optional[ValorNumber] = None
     isin: Optional[ISINType] = Field(default=None, pattern=r"[A-Z]{2}[A-Z0-9]{9}[0-9]{1}")
     symbol: str
-    security_type: Optional[str] = Field(default=None, alias="securityType", description="Type of security, if available")
-    description: Optional[str] = Field(default=None, description="Description of the security from the import file")
-    _identifier_str: Optional[str] = PrivateAttr(default=None)
+    security_type: Optional[str] = Field(
+        default=None, alias="securityType", description="Type of security, if available"
+    )
+    description: Optional[str] = Field(
+        default=None, description="Description of the security from the import file"
+    )
 
-    def _comparison_key(self):
+    def _comparison_key(self) -> tuple:
         return (self.depot, self.valor, self.isin, self.symbol)
 
     def get_processing_identifier(self) -> str:
-        if self._identifier_str is None:
-            self._identifier_str = f"{self.depot}-{self.symbol}"
-        return self._identifier_str
+        return f"{self.depot}-{self.symbol}"
 
     def get_balance_name_prefix(self) -> str:
         return ""
@@ -88,11 +98,11 @@ class SecurityPosition(BasePosition):
     def validate_security_type(cls, v):
         # Allow None or empty
         return v
-    
+
     model_config = {
         "arbitrary_types_allowed": True,
         "frozen": True,
     }
 
 
-Position = Union[CashPosition, SecurityPosition] 
+Position = Union[CashPosition, SecurityPosition]

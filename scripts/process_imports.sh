@@ -22,9 +22,10 @@ if [[ "$1" == "--minimal" ]]; then
   shift # consume the argument
 fi
 
-PHASES="-p import -p calculate -p render"
+#PHASES="-p import -p calculate -p render"
+PHASES=
 
-DEFAULT_TAX_YEAR="2024"
+DEFAULT_TAX_YEAR="2025"
 
 # Ensure output directory exists
 mkdir -p "$OUTPUT_DIR"
@@ -78,7 +79,7 @@ for input in "${IMPORT_INPUTS[@]}"; do
     
     EXTRA_ARGS="--tax-year $tax_year --tax-calculation-level $TAX_CALCULATION_LEVEL"
     importer=$(echo "$input" | cut -d'/' -f1)
-    python -m opensteuerauszug.steuerauszug "$input_leaf" --importer "$importer" $PHASES -o "$OUTPUT_DIR/$pdf_name"  --xml-output "$OUTPUT_DIR/$xml_name" --debug-dump $OUTPUT_DIR/debug_$importer ${EXTRA_ARGS:-}
+    python -m opensteuerauszug.steuerauszug process "$input_leaf" --importer "$importer" $PHASES -o "$OUTPUT_DIR/$pdf_name"  --xml-output "$OUTPUT_DIR/$xml_name" --debug-dump $OUTPUT_DIR/debug_$importer ${EXTRA_ARGS:-}
   done
 done
 

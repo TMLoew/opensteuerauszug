@@ -1,7 +1,6 @@
 import os
 import pytest
 from datetime import date
-from decimal import Decimal
 import tempfile
 from typing import List
 
@@ -10,14 +9,14 @@ from opensteuerauszug.config.models import IbkrAccountSettings
 
 # Check if ibflex is available, skip tests if not
 try:
-    from ibflex import parser as ibflex_parser
+    from ibflex import parser as ibflex_parser  # noqa: F401
+
     IBFLEX_INSTALLED = True
 except ImportError:
     IBFLEX_INSTALLED = False
 
-pytestmark = pytest.mark.skipif(
-    not IBFLEX_INSTALLED, reason="ibflex library is not installed"
-)
+pytestmark = pytest.mark.skipif(not IBFLEX_INSTALLED, reason="ibflex library is not installed")
+
 
 @pytest.fixture
 def sample_ibkr_settings() -> List[IbkrAccountSettings]:
@@ -30,6 +29,7 @@ def sample_ibkr_settings() -> List[IbkrAccountSettings]:
             full_name="Test User",
         )
     ]
+
 
 def test_corporate_action_with_issuer(sample_ibkr_settings):
     """

@@ -1,93 +1,104 @@
 import unittest
-from unittest.mock import MagicMock, patch
-from datetime import date, datetime, timedelta
+from unittest.mock import patch
+from datetime import date, timedelta
 from decimal import Decimal
 
-from opensteuerauszug.importers.schwab.schwab_importer import SchwabImporter, convert_security_positions_to_list_of_securities
-from opensteuerauszug.importers.schwab.transaction_extractor import TransactionExtractor # Assuming path
+from opensteuerauszug.importers.schwab.schwab_importer import (
+    SchwabImporter,
+    _get_configured_account_info,
+    _pick_primary_client_number,
+    _resolve_cash_account_identity,
+    _resolve_security_depot_display_name,
+    _schwab_security_display_name,
+    next_business_day,
+    settlement_date,
+    split_unsettled_cash,
+)
 from opensteuerauszug.model.ech0196 import (
-    TaxStatement,
     SecurityPayment,
     SecurityStock,
-    CurrencyId,      # This is an Annotated[str, ...]
-    QuotationType,   # This is a Literal["PIECE", "PERCENT"]
-    DepotNumber,     # This is class DepotNumber(str)
-    Security,        # Added Security for asserting results
-    ListOfSecurities # Added for type hint
-    # Import other necessary eCH-0196 models if needed for constructing test data
 )
-from opensteuerauszug.model.position import SecurityPosition
-# Assuming your models are Pydantic, otherwise adjust instantiation
-
-from opensteuerauszug.importers.schwab.schwab_importer import _get_configured_account_info, create_tax_statement_from_positions
+from opensteuerauszug.model.position import CashPosition, SecurityPosition
 from opensteuerauszug.config.models import SchwabAccountSettings
-from opensteuerauszug.model.ech0196 import ClientNumber # Import ClientNumber for assertions
 
 
 class TestGetConfiguredAccountInfo(unittest.TestCase):
     def test_awards_depot(self):
         acc_num, display_id = _get_configured_account_info(
-            depot_short_id="XYZ123",
-            account_settings_list=[],
-            is_awards_depot=True
+            depot_short_id="XYZ123", account_settings_list=[], is_awards_depot=True
         )
         self.assertIsNone(acc_num)
         self.assertEqual(display_id, "Equity Awards XYZ123")
 
     def test_non_awards_unique_match(self):
         settings = [
-            SchwabAccountSettings(account_number="CH123456789", account_name_alias="main", broker_name="schwab", canton="ZH", full_name="Test User")
+            SchwabAccountSettings(
+                account_number="CH123456789",
+                account_name_alias="main",
+                broker_name="schwab",
+                canton="ZH",
+                full_name="Test User",
+            )
         ]
         acc_num, display_id = _get_configured_account_info(
-            depot_short_id="789",
-            account_settings_list=settings,
-            is_awards_depot=False
+            depot_short_id="789", account_settings_list=settings, is_awards_depot=False
         )
         self.assertEqual(acc_num, "CH123456789")
         self.assertEqual(display_id, "CH123456789")
 
     def test_non_awards_no_match(self):
         settings = [
-            SchwabAccountSettings(account_number="CH123456789", account_name_alias="main", broker_name="schwab", canton="ZH", full_name="Test User")
+            SchwabAccountSettings(
+                account_number="CH123456789",
+                account_name_alias="main",
+                broker_name="schwab",
+                canton="ZH",
+                full_name="Test User",
+            )
         ]
         acc_num, display_id = _get_configured_account_info(
-            depot_short_id="000",
-            account_settings_list=settings,
-            is_awards_depot=False
+            depot_short_id="000", account_settings_list=settings, is_awards_depot=False
         )
         self.assertIsNone(acc_num)
         self.assertEqual(display_id, "...000")
 
     def test_non_awards_multiple_matches_uses_first(self):
         settings = [
-            SchwabAccountSettings(account_number="FR987654321", account_name_alias="secondary", broker_name="schwab", canton="ZH", full_name="Test User"),
-            SchwabAccountSettings(account_number="CH123454321", account_name_alias="primary", broker_name="schwab", canton="ZH", full_name="Test User")
+            SchwabAccountSettings(
+                account_number="FR987654321",
+                account_name_alias="secondary",
+                broker_name="schwab",
+                canton="ZH",
+                full_name="Test User",
+            ),
+            SchwabAccountSettings(
+                account_number="CH123454321",
+                account_name_alias="primary",
+                broker_name="schwab",
+                canton="ZH",
+                full_name="Test User",
+            ),
         ]
         acc_num, display_id = _get_configured_account_info(
-            depot_short_id="321",
-            account_settings_list=settings,
-            is_awards_depot=False
+            depot_short_id="321", account_settings_list=settings, is_awards_depot=False
         )
         self.assertEqual(acc_num, "FR987654321")
         self.assertEqual(display_id, "FR987654321")
 
         # Check if a warning was logged
-        with self.assertLogs('opensteuerauszug.importers.schwab.schwab_importer', level='WARNING') as cm:
+        with self.assertLogs(
+            'opensteuerauszug.importers.schwab.schwab_importer', level='WARNING'
+        ) as cm:
             _get_configured_account_info(
-                depot_short_id="321",
-                account_settings_list=settings,
-                is_awards_depot=False
+                depot_short_id="321", account_settings_list=settings, is_awards_depot=False
             )
             self.assertEqual(len(cm.output), 1)
             self.assertIn("Multiple configured Schwab accounts end with '...321'", cm.output[0])
             self.assertIn("'FR987654321' (alias: 'secondary')", cm.output[0])
 
-
     def test_non_awards_empty_settings(self):
         acc_num, display_id = _get_configured_account_info(
-            depot_short_id="123",
-            account_settings_list=[],
-            is_awards_depot=False
+            depot_short_id="123", account_settings_list=[], is_awards_depot=False
         )
         self.assertIsNone(acc_num)
         self.assertEqual(display_id, "...123")
@@ -96,268 +107,188 @@ class TestGetConfiguredAccountInfo(unittest.TestCase):
     # by test_non_awards_unique_match, as account_name_alias is mandatory.
     # The warning message for multiple matches also correctly references the alias.
 
-from opensteuerauszug.importers.schwab.schwab_importer import convert_cash_positions_to_list_of_bank_accounts
-from opensteuerauszug.model.position import CashPosition
-from opensteuerauszug.model.ech0196 import BankAccountNumber, BankAccountName, ListOfBankAccounts, Depot # Depot needed for DepotNumber
-
 
 class TestSchwabImporterAccountResolution(unittest.TestCase):
+    """Exercise the Schwab-specific display-name / client resolution helpers.
+
+    These helpers back the ``DepotNumber`` / ``BankAccountName`` /
+    ``BankAccountNumber`` / ``TaxStatement.client`` fields that the shared
+    post-processing stage in ``importers.common.postprocess`` writes to the
+    TaxStatement.  The shared stage itself is covered by tests in
+    ``tests/importers/common/test_postprocess.py``; here we only verify
+    Schwab's "awards" special case and the ``...<short_id>`` fallback.
+    """
+
     def setUp(self):
-        self.default_settings_args = {"broker_name": "schwab", "canton": "ZH", "full_name": "Test User"}
-        self.mock_stock_item = SecurityStock(
-            referenceDate=date(2023,1,1),
-            mutation=False,
-            balanceCurrency="USD",
-            quotationType="PIECE",
-            quantity=Decimal(10)
+        self.default_settings_args = {
+            "broker_name": "schwab",
+            "canton": "ZH",
+            "full_name": "Test User",
+        }
+
+    # --- _resolve_cash_account_identity ---
+
+    def test_cash_identity_unique_match(self):
+        settings = [
+            SchwabAccountSettings(
+                account_number="CH123-789",
+                account_name_alias="main",
+                **self.default_settings_args,
+            )
+        ]
+        pos = CashPosition(depot="789", currentCy="USD", cash_account_id="cash789", type="cash")
+        name, number = _resolve_cash_account_identity(pos, settings)
+        self.assertEqual(name, "CH123-789")
+        self.assertEqual(number, "CH123-789")
+
+    def test_cash_identity_no_match_uses_currency_prefix(self):
+        settings = [
+            SchwabAccountSettings(
+                account_number="CH123-000",
+                account_name_alias="other",
+                **self.default_settings_args,
+            )
+        ]
+        pos = CashPosition(depot="789", currentCy="USD", cash_account_id="cash789", type="cash")
+        name, number = _resolve_cash_account_identity(pos, settings)
+        self.assertEqual(name, "USD Account ...789")
+        self.assertIsNone(number)
+
+    def test_cash_identity_awards_ignores_settings(self):
+        settings = [
+            SchwabAccountSettings(
+                account_number="CH123-IGNORE",
+                account_name_alias="main_ignore",
+                **self.default_settings_args,
+            )
+        ]
+        pos = CashPosition(
+            depot="AWARDS",
+            cash_account_id="AWARD123",
+            currentCy="USD",
+            type="cash",
         )
-        self.mock_security_stock_item = SecurityStock(
-            referenceDate=date(2023,1,1),
-            mutation=False,
-            balanceCurrency="USD",
-            quotationType="PIECE",
-            quantity=Decimal(10),
-            name="Mock Security Stock"
+        name, number = _resolve_cash_account_identity(pos, settings)
+        self.assertEqual(name, "Equity Awards AWARD123")
+        self.assertIsNone(number)
+
+    def test_cash_identity_empty_settings(self):
+        pos = CashPosition(depot="789", currentCy="USD", cash_account_id="cash789", type="cash")
+        name, number = _resolve_cash_account_identity(pos, [])
+        self.assertEqual(name, "USD Account ...789")
+        self.assertIsNone(number)
+
+    def test_cash_identity_unsettled_suffix_truncates_to_40_chars(self):
+        pos = CashPosition(
+            depot="AWARDS",
+            cash_account_id="VERYLONGAWARDACCOUNTIDENTIFIER",
+            currentCy="USD",
+            is_unsettled_balance=True,
+            type="cash",
         )
-        self.period_to_date = date(2023, 12, 31)
+        name, _ = _resolve_cash_account_identity(pos, [])
+        self.assertLessEqual(len(name), 40)
+        self.assertTrue(name.endswith(" (Unsettled)"))
 
-    # --- BankAccountNumber Tests ---
-    def test_bank_account_number_unique_match(self):
+    # --- _resolve_security_depot_display_name ---
+
+    def test_security_depot_unique_match(self):
         settings = [
-            SchwabAccountSettings(account_number="CH123-789", account_name_alias="main", **self.default_settings_args)
+            SchwabAccountSettings(
+                account_number="CH999-123",
+                account_name_alias="sec_main",
+                **self.default_settings_args,
+            )
         ]
-        cash_pos = CashPosition(depot="789", currentCy="USD", cash_account_id="cash789", type="cash") # cash_account_id is mandatory
-        cash_tuples = [(cash_pos, [self.mock_stock_item], [])]
+        self.assertEqual(_resolve_security_depot_display_name("123", settings), "CH999-123")
 
-        result_list: ListOfBankAccounts = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
-
-        self.assertIsNotNone(result_list.bankAccount)
-        self.assertEqual(len(result_list.bankAccount), 1)
-        self.assertEqual(result_list.bankAccount[0].bankAccountNumber, BankAccountNumber("CH123-789"))
-
-    def test_bank_account_number_no_match(self):
+    def test_security_depot_no_match_falls_back_to_dots(self):
         settings = [
-            SchwabAccountSettings(account_number="CH123-000", account_name_alias="other", **self.default_settings_args)
+            SchwabAccountSettings(
+                account_number="CH999-000",
+                account_name_alias="sec_other",
+                **self.default_settings_args,
+            )
         ]
-        cash_pos = CashPosition(depot="789", currentCy="USD", cash_account_id="cash789", type="cash")
-        cash_tuples = [(cash_pos, [self.mock_stock_item], [])]
+        self.assertEqual(_resolve_security_depot_display_name("123", settings), "...123")
 
-        result_list: ListOfBankAccounts = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
-
-        self.assertIsNotNone(result_list.bankAccount)
-        self.assertEqual(len(result_list.bankAccount), 1)
-        self.assertIsNone(result_list.bankAccount[0].bankAccountNumber)  # No configured account number
-        self.assertEqual(result_list.bankAccount[0].bankAccountName, BankAccountName("USD Account ...789"))
-
-    def test_bank_account_number_awards(self):
+    def test_security_depot_awards_stays_verbatim(self):
         settings = [
-             SchwabAccountSettings(account_number="CH123-IGNORE", account_name_alias="main_ignore", **self.default_settings_args)
-        ] # Settings should be ignored for awards
-        cash_pos = CashPosition(depot="AWARDS", cash_account_id="AWARD123", currentCy="USD", type="cash")
-        cash_tuples = [(cash_pos, [self.mock_stock_item], [])]
-
-        result_list: ListOfBankAccounts = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
-
-        self.assertIsNotNone(result_list.bankAccount)
-        self.assertEqual(len(result_list.bankAccount), 1)
-        self.assertIsNone(result_list.bankAccount[0].bankAccountNumber)  # No configured account number for awards
-        self.assertEqual(result_list.bankAccount[0].bankAccountName, BankAccountName("Equity Awards AWARD123"))
-
-    def test_bank_account_number_empty_settings(self):
-        settings = []
-        cash_pos = CashPosition(depot="789", currentCy="USD", cash_account_id="cash789", type="cash")
-        cash_tuples = [(cash_pos, [self.mock_stock_item], [])]
-
-        result_list: ListOfBankAccounts = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
-
-        self.assertIsNotNone(result_list.bankAccount)
-        self.assertEqual(len(result_list.bankAccount), 1)
-        self.assertIsNone(result_list.bankAccount[0].bankAccountNumber)  # No configured account number
-        self.assertEqual(result_list.bankAccount[0].bankAccountName, BankAccountName("USD Account ...789"))
-
-    # --- Depot.depotNumber Tests ---
-    def test_security_depot_number_unique_match(self):
-        settings = [
-            SchwabAccountSettings(account_number="CH999-123", account_name_alias="sec_main", **self.default_settings_args)
+            SchwabAccountSettings(
+                account_number="CH999-IGNORE",
+                account_name_alias="sec_ignore",
+                **self.default_settings_args,
+            )
         ]
-        sec_pos = SecurityPosition(depot="123", symbol="TEST", description="Test Security", type="security")
-        # Ensure stock has required fields: referenceDate, mutation, quotationType, quantity, balanceCurrency
-        security_tuples = [(sec_pos, [self.mock_security_stock_item], [])]
+        self.assertEqual(_resolve_security_depot_display_name("AWARDS", settings), "AWARDS")
 
-        result_list: ListOfSecurities = convert_security_positions_to_list_of_securities(security_tuples, settings)
+    # --- _pick_primary_client_number ---
 
-        self.assertIsNotNone(result_list.depot)
-        self.assertEqual(len(result_list.depot), 1)
-        # DepotNumber is a class that subclasses str, direct comparison might work or cast to str
-        self.assertEqual(result_list.depot[0].depotNumber, DepotNumber("CH999-123"))
-
-
-    def test_security_depot_number_no_match(self):
+    def test_pick_primary_skips_awards(self):
         settings = [
-            SchwabAccountSettings(account_number="CH999-000", account_name_alias="sec_other", **self.default_settings_args)
+            SchwabAccountSettings(
+                account_number="AWARDS-NUM",
+                account_name_alias="awards",
+                **self.default_settings_args,
+            ),
+            SchwabAccountSettings(
+                account_number="CH123-FIRST",
+                account_name_alias="main",
+                **self.default_settings_args,
+            ),
+            SchwabAccountSettings(
+                account_number="CH456-SECOND",
+                account_name_alias="secondary",
+                **self.default_settings_args,
+            ),
         ]
-        sec_pos = SecurityPosition(depot="123", symbol="TEST", description="Test Security", type="security")
-        security_tuples = [(sec_pos, [self.mock_security_stock_item], [])]
+        self.assertEqual(_pick_primary_client_number(settings), "CH123-FIRST")
 
-        result_list: ListOfSecurities = convert_security_positions_to_list_of_securities(security_tuples, settings)
-
-        self.assertIsNotNone(result_list.depot)
-        self.assertEqual(len(result_list.depot), 1)
-        self.assertEqual(result_list.depot[0].depotNumber, DepotNumber("...123"))
-
-    def test_security_depot_number_awards(self):
+    def test_pick_primary_all_awards_returns_none(self):
         settings = [
-            SchwabAccountSettings(account_number="CH999-IGNORE", account_name_alias="sec_ignore", **self.default_settings_args)
-        ] # Settings should be ignored
-        sec_pos = SecurityPosition(depot="AWARDS", symbol="AWARDSEC", description="Award Security", type="security")
-        security_tuples = [(sec_pos, [self.mock_security_stock_item], [])]
+            SchwabAccountSettings(
+                account_number="AWARDS-NUM1",
+                account_name_alias="awards",
+                **self.default_settings_args,
+            ),
+            SchwabAccountSettings(
+                account_number="AWARDS-NUM2",
+                account_name_alias="awards",
+                **self.default_settings_args,
+            ),
+        ]
+        self.assertIsNone(_pick_primary_client_number(settings))
 
-        result_list: ListOfSecurities = convert_security_positions_to_list_of_securities(security_tuples, settings)
+    def test_pick_primary_empty_settings_returns_none(self):
+        self.assertIsNone(_pick_primary_client_number([]))
 
-        self.assertIsNotNone(result_list.depot)
-        self.assertEqual(len(result_list.depot), 1)
-        self.assertEqual(result_list.depot[0].depotNumber, DepotNumber("AWARDS"))
-
-    # --- TaxStatement.clientID Tests ---
-    def test_tax_statement_client_id_first_non_awards(self):
+    def test_pick_primary_no_awards_returns_first(self):
         settings = [
-            SchwabAccountSettings(account_number="AWARDS-NUM", account_name_alias="awards", **self.default_settings_args),
-            SchwabAccountSettings(account_number="CH123-FIRST", account_name_alias="main", **self.default_settings_args),
-            SchwabAccountSettings(account_number="CH456-SECOND", account_name_alias="secondary", **self.default_settings_args)
+            SchwabAccountSettings(
+                account_number="CH123-MAIN",
+                account_name_alias="main",
+                **self.default_settings_args,
+            ),
+            SchwabAccountSettings(
+                account_number="CH456-ALT",
+                account_name_alias="alternative",
+                **self.default_settings_args,
+            ),
         ]
-        statement: TaxStatement = create_tax_statement_from_positions(
-            security_tuples=[],
-            cash_tuples=[],
-            period_from=date(2023,1,1),
-            period_to=self.period_to_date,
-            tax_period=2023,
-            account_settings_list=settings
-        )
-        self.assertEqual(len(statement.client), 1)
-        self.assertEqual(statement.client[0].clientNumber, ClientNumber("CH123-FIRST"))
-
-    def test_tax_statement_client_id_only_awards(self):
-        settings = [
-            SchwabAccountSettings(account_number="AWARDS-NUM1", account_name_alias="awards", **self.default_settings_args),
-            SchwabAccountSettings(account_number="AWARDS-NUM2", account_name_alias="AWARDS_alias", **self.default_settings_args)
-            # Note: "AWARDS_alias" will also be treated as an awards alias due to .lower() check
-        ]
-        # Re-create one with explicit "awards" to be sure, as the previous comment might be slightly off
-        # if the check is strictly 'alias.lower() == "awards"' vs 'alias.lower().contains("awards")'
-        # The current implementation is setting.account_name_alias.lower() != "awards"
-        # So "AWARDS_alias".lower() != "awards" is true. Let's make one explicitly "awards".
-        settings_strict_awards = [
-            SchwabAccountSettings(account_number="AWARDS-NUM1", account_name_alias="awards", **self.default_settings_args),
-            SchwabAccountSettings(account_number="AWARDS-NUM2", account_name_alias="awards", **self.default_settings_args)
-        ]
-        statement: TaxStatement = create_tax_statement_from_positions(
-            [], [], date(2023,1,1), self.period_to_date, 2023, settings_strict_awards
-        )
-        self.assertEqual(len(statement.client), 0)
-
-    def test_tax_statement_client_id_empty_settings(self):
-        settings = []
-        statement: TaxStatement = create_tax_statement_from_positions(
-            [], [], date(2023,1,1), self.period_to_date, 2023, settings
-        )
-        self.assertEqual(len(statement.client), 0)
-
-    def test_tax_statement_client_id_no_awards_present(self):
-        settings = [
-            SchwabAccountSettings(account_number="CH123-MAIN", account_name_alias="main", **self.default_settings_args),
-            SchwabAccountSettings(account_number="CH456-ALT", account_name_alias="alternative", **self.default_settings_args)
-        ]
-        statement: TaxStatement = create_tax_statement_from_positions(
-            [], [], date(2023,1,1), self.period_to_date, 2023, settings
-        )
-        self.assertEqual(len(statement.client), 1)
-        self.assertEqual(statement.client[0].clientNumber, ClientNumber("CH123-MAIN"))
+        self.assertEqual(_pick_primary_client_number(settings), "CH123-MAIN")
 
 
 class TestSchwabImporterProcessing(unittest.TestCase):
 
-    def test_convert_security_positions_populates_symbol(self):
-        """
-        Tests that `convert_security_positions_to_list_of_securities`
-        correctly populates the `symbol` and `securityName` fields in the
-        resulting Security objects.
-        """
-        depot1_str = "DEPOT1"
-        # Case 1: Symbol and Description present
-        pos1 = SecurityPosition(depot=depot1_str, symbol="MOCKSYM1", description="DESC1", type="security")
-        stock1 = SecurityStock(referenceDate=date(2023,1,1), mutation=False, balanceCurrency="USD", quotationType="PIECE", quantity=Decimal(10))
+    def test_security_display_name_description_plus_symbol(self):
+        pos = SecurityPosition(
+            depot="DEPOT1", symbol="MOCKSYM1", description="DESC1", type="security"
+        )
+        self.assertEqual(_schwab_security_display_name(pos), "DESC1 (MOCKSYM1)")
 
-        # Case 2: Symbol present, Description is None
-        pos2 = SecurityPosition(depot=depot1_str, symbol="MOCKSYM2", description=None, type="security")
-        stock2 = SecurityStock(referenceDate=date(2023,1,1), mutation=False, balanceCurrency="EUR", quotationType="PERCENT", quantity=Decimal(100))
-
-        security_tuples = [
-            (pos1, [stock1], []),
-            (pos2, [stock2], []),
-        ]
-        # Provide an empty list for account_settings_list for this existing test
-        settings_for_test = []
-        list_of_securities: ListOfSecurities = convert_security_positions_to_list_of_securities(security_tuples, settings_for_test)
-
-        self.assertIsNotNone(list_of_securities)
-        self.assertEqual(len(list_of_securities.depot), 1)
-        # The depot name will now be "...DEPOT1" due to no matching settings.
-        # This test was about symbol and securityName, not depot name resolution.
-        # To keep the original assertion for depot name, we'd need to add a setting.
-        # For now, let's adjust the expectation or accept the new default.
-        # Given the test name, it's better to make it pass with minimal changes if depot name isn't its focus.
-        # However, to be robust, let's provide a setting that resolves it as it was.
-        settings_for_test_resolved = [
-             SchwabAccountSettings(account_number="DEPOT1", account_name_alias="test_depot1", broker_name="schwab", canton="ZH", full_name="Test User")
-        ]
-        list_of_securities_resolved: ListOfSecurities = convert_security_positions_to_list_of_securities(security_tuples, settings_for_test_resolved)
-
-        # Using the resolved list for assertions below
-        self.assertIsNotNone(list_of_securities_resolved)
-        self.assertEqual(len(list_of_securities_resolved.depot), 1)
-        depot = list_of_securities_resolved.depot[0]
-
-        self.assertEqual(depot.depotNumber, depot1_str) # This should now pass
-        self.assertEqual(len(depot.security), 2)
-
-        # Assertions for pos1
-        sec1 = depot.security[0]
-        self.assertEqual(sec1.symbol, "MOCKSYM1")
-        self.assertEqual(sec1.securityName, "DESC1 (MOCKSYM1)")
-        self.assertEqual(sec1.currency, "USD") # Check a few other fields for sanity
-        self.assertEqual(sec1.quotationType, "PIECE")
-
-        # Assertions for pos2
-        sec2 = depot.security[1]
-        self.assertEqual(sec2.symbol, "MOCKSYM2")
-        self.assertEqual(sec2.securityName, "MOCKSYM2") # No description, so just symbol
-        self.assertEqual(sec2.currency, "EUR")
-        self.assertEqual(sec2.quotationType, "PERCENT")
-
-    def test_convert_security_positions_assigns_unique_position_ids(self):
-        """Ensure generated Security objects have unique positionId values."""
-        depot_str = "DEPOT1"
-        # Use the same symbol for both positions to ensure uniqueness does not
-        # depend on the symbol value.
-        pos1 = SecurityPosition(depot=depot_str, symbol="DUPL", description="DESC1", type="security")
-        stock1 = SecurityStock(referenceDate=date(2023, 1, 1), mutation=False,
-                               balanceCurrency="USD", quotationType="PIECE", quantity=Decimal(1))
-
-        pos2 = SecurityPosition(depot=depot_str, symbol="DUPL", description="DESC2", type="security")
-        stock2 = SecurityStock(referenceDate=date(2023, 1, 2), mutation=False,
-                               balanceCurrency="USD", quotationType="PIECE", quantity=Decimal(2))
-
-        security_tuples = [
-            (pos1, [stock1], []),
-            (pos2, [stock2], [])
-        ]
-
-        result = convert_security_positions_to_list_of_securities(security_tuples, [])
-        self.assertIsNotNone(result.depot)
-        self.assertEqual(len(result.depot), 1)
-        depot = result.depot[0]
-        ids = [s.positionId for s in depot.security]
-        self.assertEqual(len(ids), len(set(ids)), "positionId values must be unique")
+    def test_security_display_name_symbol_only(self):
+        pos = SecurityPosition(depot="DEPOT1", symbol="MOCKSYM2", description=None, type="security")
+        self.assertEqual(_schwab_security_display_name(pos), "MOCKSYM2")
 
     def test_transaction_with_multiple_stock_items_does_not_duplicate_payments(self):
         """
@@ -377,109 +308,141 @@ class TestSchwabImporterProcessing(unittest.TestCase):
         # Mock SecurityStock items (multiple)
         mock_stock_item_1_balance = SecurityStock(
             referenceDate=period_from_date,
-            mutation=False, # This is a balance
+            mutation=False,  # This is a balance
             balanceCurrency="CHF",
             quotationType="PIECE",
             quantity=Decimal('10'),
-            name="Opening Balance Lot"
+            name="Opening Balance Lot",
         )
         # This item from the transaction should represent a change or a different lot
         # If it's a different lot existing at the same time, the total starting balance would be sum.
         # For simplicity and consistency, let's make the second item a mutation.
         mock_stock_item_2_mutation = SecurityStock(
-            referenceDate=period_from_date, # Same day as balance, but mutation
-            mutation=True, # This is a mutation
+            referenceDate=period_from_date,  # Same day as balance, but mutation
+            mutation=True,  # This is a mutation
             balanceCurrency="CHF",
             quotationType="PIECE",
-            quantity=Decimal('20'), # e.g., an acquisition of 20 more
-            name="Acquired Lot on same day"
+            quantity=Decimal('20'),  # e.g., an acquisition of 20 more
+            name="Acquired Lot on same day",
         )
         # TransactionExtractor returns a list of stocks related to the transaction.
         # Let's assume the transaction resulted in the acquisition.
         # The initial_stocks list for PositionReconciler will combine this with StatementExtractor's data.
         mock_transaction_stocks_list = [mock_stock_item_2_mutation]
-    
+
         # Mock SecurityPayment items (a list of unique payments)
         # Ensure all required fields for SecurityPayment are present.
         # Required: paymentDate, quotationType, quantity, amountCurrency
         mock_payment_1 = SecurityPayment(
             name="Dividend Payment 1",
             paymentDate=date(2023, 6, 15),
-            amountCurrency="CHF", 
-            quotationType="PIECE", 
-            quantity=Decimal('1'), # Example quantity for payment
-            amount=Decimal("50.00"), # Optional, but good for testing
-            grossRevenueB=Decimal("50.00") # Optional
+            amountCurrency="CHF",
+            quotationType="PIECE",
+            quantity=Decimal('1'),  # Example quantity for payment
+            amount=Decimal("50.00"),  # Optional, but good for testing
+            grossRevenueB=Decimal("50.00"),  # Optional
         )
         mock_payment_2 = SecurityPayment(
             name="Interest Payment 1",
             paymentDate=date(2023, 7, 20),
-            amountCurrency="CHF", 
-            quotationType="PIECE", 
-            quantity=Decimal('1'), # Example
-            amount=Decimal("25.00"), # Optional
-            grossRevenueB=Decimal("25.00") # Optional
+            amountCurrency="CHF",
+            quotationType="PIECE",
+            quantity=Decimal('1'),  # Example
+            amount=Decimal("25.00"),  # Optional
+            grossRevenueB=Decimal("25.00"),  # Optional
         )
         mock_payments_list = [mock_payment_1, mock_payment_2]
 
         # Mock return value for TransactionExtractor.extract_transactions
         # (position, stocks, payments, depot, (start_date, end_date))
         mock_transaction_data = [
-            (mock_position, mock_transaction_stocks_list, mock_payments_list, test_depot_str, (period_from_date, period_to_date))
+            (
+                mock_position,
+                mock_transaction_stocks_list,
+                mock_payments_list,
+                test_depot_str,
+                (period_from_date, period_to_date),
+            )
         ]
 
         # 2. Patch TransactionExtractor and depot_position_dates
-        with patch('opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor') as MockTransactionExtractor:
+        with patch(
+            'opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor'
+        ) as MockTransactionExtractor:
             mock_extractor_instance = MockTransactionExtractor.return_value
             mock_extractor_instance.extract_transactions.return_value = mock_transaction_data
 
             # Patch StatementExtractor.extract_positions to return a dummy statement for the same depot and date
             # This should be the starting balance before the transaction's effects.
-            dummy_positions_pdf = [
-                (mock_position, mock_stock_item_1_balance)
-            ]
+            dummy_positions_pdf = [(mock_position, mock_stock_item_1_balance)]
             dummy_depot_pdf = test_depot_str
             dummy_open_date_pdf = period_from_date
             # Use a date that ensures this statement is considered for initial balance
             dummy_close_date_plus1_pdf = period_from_date
-            with patch('opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor') as MockStatementExtractor:
+            with patch(
+                'opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor'
+            ) as MockStatementExtractor:
                 mock_statement_instance = MockStatementExtractor.return_value
-                mock_statement_instance.extract_positions.return_value = (dummy_positions_pdf, dummy_open_date_pdf, dummy_close_date_plus1_pdf, dummy_depot_pdf)
+                mock_statement_instance.extract_positions.return_value = (
+                    dummy_positions_pdf,
+                    dummy_open_date_pdf,
+                    dummy_close_date_plus1_pdf,
+                    dummy_depot_pdf,
+                )
 
                 # Provide a setting for DP1 to resolve correctly
                 importer_settings = [
-                    SchwabAccountSettings(account_number="DP1", account_name_alias="dp1_alias", broker_name="schwab", canton="ZH", full_name="Test User")
+                    SchwabAccountSettings(
+                        account_number="DP1",
+                        account_name_alias="dp1_alias",
+                        broker_name="schwab",
+                        canton="ZH",
+                        full_name="Test User",
+                    )
                 ]
-                importer = SchwabImporter(period_from=period_from_date, period_to=period_to_date, account_settings_list=importer_settings)
+                importer = SchwabImporter(
+                    period_from=period_from_date,
+                    period_to=period_to_date,
+                    account_settings_list=importer_settings,
+                )
                 tax_statement = importer.import_files(['dummy.json', 'dummy.pdf'])
 
                 # 4. Assertions
                 self.assertIsNotNone(tax_statement)
-                self.assertIsNotNone(tax_statement.listOfSecurities, "listOfSecurities should not be None")
-                
+                self.assertIsNotNone(
+                    tax_statement.listOfSecurities, "listOfSecurities should not be None"
+                )
+
                 # Explicit if check to help linter with type narrowing
                 if tax_statement.listOfSecurities is not None:
                     list_of_securities = tax_statement.listOfSecurities
-                    self.assertEqual(len(list_of_securities.depot), 1, "Should be one depot") # type: ignore
+                    self.assertEqual(len(list_of_securities.depot), 1, "Should be one depot")  # type: ignore
 
-                    depot_data = list_of_securities.depot[0] # type: ignore
+                    depot_data = list_of_securities.depot[0]  # type: ignore
                     self.assertIsNotNone(depot_data.depotNumber, "Depot number should not be None")
                     # DepotNumber is a str subclass, can be compared directly or cast to str
                     self.assertEqual(depot_data.depotNumber, test_depot_str)
 
-                    self.assertEqual(len(depot_data.security), 1, "Should be one security entry for TESTETF")
+                    self.assertEqual(
+                        len(depot_data.security), 1, "Should be one security entry for TESTETF"
+                    )
 
                     security_entry = depot_data.security[0]
-                    self.assertEqual(security_entry.symbol, test_symbol) # Test symbol is populated
-                    self.assertEqual(security_entry.securityName, test_symbol) # Assuming no description for this mock
+                    self.assertEqual(security_entry.symbol, test_symbol)  # Test symbol is populated
+                    self.assertEqual(
+                        security_entry.securityName, test_symbol
+                    )  # Assuming no description for this mock
 
                     # Key Assertion: Check the number of payments
                     self.assertIsNotNone(security_entry.payment, "Payments list should not be None")
-                    self.assertEqual(len(security_entry.payment), len(mock_payments_list),
-                                     f"Expected {len(mock_payments_list)} payments, but got {len(security_entry.payment)}. Payments found: {security_entry.payment}")
+                    self.assertEqual(
+                        len(security_entry.payment),
+                        len(mock_payments_list),
+                        f"Expected {len(mock_payments_list)} payments, but got {len(security_entry.payment)}. Payments found: {security_entry.payment}",
+                    )
                 else:
                     # This else block should not be reached if the assertIsNotNone above works
-                    self.fail("tax_statement.listOfSecurities was None after assertIsNotNone, which is unexpected.") # type: ignore
+                    self.fail("tax_statement.listOfSecurities was None after assertIsNotNone, which is unexpected.")  # type: ignore
 
     def test_statement_date_one_day_after_range_is_accepted(self):
         """
@@ -500,14 +463,22 @@ class TestSchwabImporterProcessing(unittest.TestCase):
             balanceCurrency="CHF",
             quotationType="PIECE",
             quantity=Decimal('10'),
-            name="Test Stock Lot"
+            name="Test Stock Lot",
         )
         mock_stocks_list = [mock_stock_item]
         mock_payments_list = []
         mock_transaction_data = [
-            (mock_position, mock_stocks_list, mock_payments_list, test_depot_str, (period_from_date, period_to_date))
+            (
+                mock_position,
+                mock_stocks_list,
+                mock_payments_list,
+                test_depot_str,
+                (period_from_date, period_to_date),
+            )
         ]
-        with patch('opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor') as MockTransactionExtractor:
+        with patch(
+            'opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor'
+        ) as MockTransactionExtractor:
             mock_extractor_instance = MockTransactionExtractor.return_value
             mock_extractor_instance.extract_transactions.return_value = mock_transaction_data
             # Patch StatementExtractor.extract_positions to return a statement date one day after the range
@@ -515,14 +486,31 @@ class TestSchwabImporterProcessing(unittest.TestCase):
             dummy_depot = test_depot_str
             dummy_open_date = period_from_date
             dummy_close_date_plus1 = statement_date
-            with patch('opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor') as MockStatementExtractor:
+            with patch(
+                'opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor'
+            ) as MockStatementExtractor:
                 mock_statement_instance = MockStatementExtractor.return_value
-                mock_statement_instance.extract_positions.return_value = (dummy_positions, dummy_open_date, dummy_close_date_plus1, dummy_depot)
+                mock_statement_instance.extract_positions.return_value = (
+                    dummy_positions,
+                    dummy_open_date,
+                    dummy_close_date_plus1,
+                    dummy_depot,
+                )
                 # Provide a setting for DP2 to resolve correctly, though this test isn't about the name itself
                 importer_settings = [
-                    SchwabAccountSettings(account_number="DP2", account_name_alias="dp2_alias", broker_name="schwab", canton="ZH", full_name="Test User")
+                    SchwabAccountSettings(
+                        account_number="DP2",
+                        account_name_alias="dp2_alias",
+                        broker_name="schwab",
+                        canton="ZH",
+                        full_name="Test User",
+                    )
                 ]
-                importer = SchwabImporter(period_from=period_from_date, period_to=period_to_date, account_settings_list=importer_settings)
+                importer = SchwabImporter(
+                    period_from=period_from_date,
+                    period_to=period_to_date,
+                    account_settings_list=importer_settings,
+                )
                 # Should not raise
                 tax_statement = importer.import_files(['dummy.json', 'dummy.pdf'])
                 self.assertIsNotNone(tax_statement)
@@ -550,7 +538,13 @@ class TestSchwabImporterProcessing(unittest.TestCase):
             name="Transfer (Shares)",
         )
         mock_transaction_data = [
-            (vt_pos, [vt_buy, vt_transfer_out], None, test_depot_str, (period_from_date, period_to_date))
+            (
+                vt_pos,
+                [vt_buy, vt_transfer_out],
+                None,
+                test_depot_str,
+                (period_from_date, period_to_date),
+            )
         ]
 
         # Provide at least one statement date in range for depot coverage validation,
@@ -564,20 +558,40 @@ class TestSchwabImporterProcessing(unittest.TestCase):
             quantity=Decimal("1"),
             name="Opening Balance",
         )
-        statement_result = ([(statement_pos, statement_stock)], period_from_date, period_from_date, test_depot_str)
+        statement_result = (
+            [(statement_pos, statement_stock)],
+            period_from_date,
+            period_from_date,
+            test_depot_str,
+        )
 
-        with patch('opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor') as MockTransactionExtractor:
+        with patch(
+            'opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor'
+        ) as MockTransactionExtractor:
             mock_extractor_instance = MockTransactionExtractor.return_value
             mock_extractor_instance.extract_transactions.return_value = mock_transaction_data
 
-            with patch('opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor') as MockStatementExtractor:
+            with patch(
+                'opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor'
+            ) as MockStatementExtractor:
                 mock_statement_instance = MockStatementExtractor.return_value
                 mock_statement_instance.extract_positions.return_value = statement_result
 
                 importer_settings = [
-                    SchwabAccountSettings(account_number="DP3", account_name_alias="dp3_alias", broker_name="schwab", canton="ZH", full_name="Test User")
+                    SchwabAccountSettings(
+                        account_number="DP3",
+                        account_name_alias="dp3_alias",
+                        broker_name="schwab",
+                        canton="ZH",
+                        full_name="Test User",
+                    )
                 ]
-                importer = SchwabImporter(period_from=period_from_date, period_to=period_to_date, account_settings_list=importer_settings, strict_consistency=True)
+                importer = SchwabImporter(
+                    period_from=period_from_date,
+                    period_to=period_to_date,
+                    account_settings_list=importer_settings,
+                    strict_consistency=True,
+                )
                 tax_statement = importer.import_files(['dummy.json', 'dummy.pdf'])
 
         self.assertIsNotNone(tax_statement)
@@ -594,124 +608,431 @@ class TestSchwabImporterProcessing(unittest.TestCase):
         vt_stock_quantities = [stock.quantity for stock in vt_securities[0].stock]
         self.assertIn(Decimal("-10"), vt_stock_quantities)
 
-class TestSchwabImporterBankAccountNames(unittest.TestCase):
-    """Test that bank account names are always set for all bank accounts."""
 
-    def setUp(self):
-        self.default_settings_args = {"broker_name": "schwab", "canton": "ZH", "full_name": "Test User"}
-        self.period_to_date = date(2023, 12, 31)
+class TestNextBusinessDay(unittest.TestCase):
+    """Unit tests for the next_business_day / settlement_date helpers."""
 
-    def test_bank_account_names_always_set_with_configured_accounts(self):
-        """Test that bank account names are set when accounts are configured."""
-        settings = [
-            SchwabAccountSettings(account_number="CH123-456789", account_name_alias="main", **self.default_settings_args)
+    def test_monday_to_tuesday(self):
+        self.assertEqual(next_business_day(date(2025, 12, 29)), date(2025, 12, 30))  # Mon → Tue
+
+    def test_friday_to_monday(self):
+        self.assertEqual(next_business_day(date(2025, 12, 26)), date(2025, 12, 29))  # Fri → Mon
+
+    def test_saturday_to_monday(self):
+        self.assertEqual(next_business_day(date(2025, 12, 27)), date(2025, 12, 29))  # Sat → Mon
+
+    def test_sunday_to_monday(self):
+        self.assertEqual(next_business_day(date(2025, 12, 28)), date(2025, 12, 29))  # Sun → Mon
+
+    def test_wednesday_before_new_years_skips_holiday(self):
+        # Dec 31 2025 is a Wednesday; Jan 1 2026 is a NYSE holiday (New Year's Day)
+        # so the next trading day is Jan 2 2026 (Friday)
+        self.assertEqual(
+            next_business_day(date(2025, 12, 31)), date(2026, 1, 2)
+        )  # Wed → Fri (skip holiday)
+
+    def test_christmas_eve_skips_christmas(self):
+        # Dec 24 2025 is a Wednesday; Dec 25 is a NYSE holiday (Christmas)
+        # so the next trading day is Dec 26 2025 (Friday)
+        self.assertEqual(
+            next_business_day(date(2025, 12, 24)), date(2025, 12, 26)
+        )  # Wed → Fri (skip holiday)
+
+    def test_day_before_thanksgiving_skips_holiday(self):
+        # Thanksgiving 2025 is Nov 27 (Thursday); next trading day after Nov 26 is Nov 28 (Friday)
+        self.assertEqual(
+            next_business_day(date(2025, 11, 26)), date(2025, 11, 28)
+        )  # Wed → Fri (skip holiday)
+
+    def test_regular_trading_day_not_affected(self):
+        # Jan 2 2025 is a regular Thursday trading day
+        self.assertEqual(next_business_day(date(2025, 1, 2)), date(2025, 1, 3))  # Thu → Fri
+
+    def test_settlement_date_aliases_next_business_day(self):
+        d = date(2025, 12, 30)
+        self.assertEqual(settlement_date(d), next_business_day(d))
+
+
+class TestSplitUnsettledCash(unittest.TestCase):
+    """Unit tests for split_unsettled_cash."""
+
+    def _bal(self, d: str, qty: str) -> SecurityStock:
+        return SecurityStock(
+            referenceDate=date.fromisoformat(d),
+            mutation=False,
+            quantity=Decimal(qty),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+
+    def _mut(self, d: str, qty: str, requires_settlement: bool = True) -> SecurityStock:
+        """Create a trade cash mutation (requires_settlement=True by default)."""
+        return SecurityStock(
+            referenceDate=date.fromisoformat(d),
+            mutation=True,
+            quantity=Decimal(qty),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+            requires_settlement=requires_settlement,
+        )
+
+    def test_no_mutations(self):
+        stocks = [self._bal("2025-01-01", "0"), self._bal("2026-01-01", "0")]
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(len(settled), 2)
+        self.assertEqual(len(unsettled), 0)
+
+    def test_settled_trade_before_period_end(self):
+        # Dec 29 (Mon) trade settles Dec 30 (Tue) ≤ Dec 31 → settled
+        stocks = [
+            self._bal("2025-01-01", "0"),
+            self._mut("2025-12-29", "500"),
+            self._bal("2026-01-01", "500"),
         ]
-        
-        # Create cash positions
-        cash_pos1 = CashPosition(depot="456789", currentCy="USD", cash_account_id="cash456789", type="cash")
-        cash_pos2 = CashPosition(depot="456789", currentCy="EUR", cash_account_id="cash456789_eur", type="cash")
-        
-        # Create stock items for each position
-        stock1 = SecurityStock(
-            referenceDate=date(2024, 1, 1),  # day after period
-            mutation=False,
-            quotationType="PIECE", 
-            quantity=Decimal(1000),
-            balanceCurrency='USD'
-        )
-        stock2 = SecurityStock(
-            referenceDate=date(2024, 1, 1),  # day after period
-            mutation=False,
-            quotationType="PIECE",
-            quantity=Decimal(500),
-            balanceCurrency='EUR'
-        )
-        
-        cash_tuples = [
-            (cash_pos1, [stock1], []),
-            (cash_pos2, [stock2], [])
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(len(unsettled), 0)
+        self.assertEqual(len(settled), 3)
+
+    def test_unsettled_trade_on_period_end_weekday(self):
+        # Dec 31 2025 is a Wednesday; settlement is Jan 2 2026 (skip Jan 1 NYSE holiday) > Dec 31 → unsettled
+        stocks = [
+            self._bal("2025-01-01", "0"),
+            self._mut("2025-12-31", "1000"),
+            self._bal("2026-01-01", "0"),
         ]
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(len(unsettled), 1)
+        self.assertEqual(unsettled[0].quantity, Decimal("1000"))
 
-        result = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
+    def test_future_trade_after_period_end_is_not_unsettled_for_period_end(self):
+        # A Schwab export can include transactions after the requested tax year.
+        # Those future trades must remain in the main cash timeline for backward
+        # reconciliation from a later balance snapshot; they are not unsettled
+        # cash at the previous year end.
+        stocks = [self._bal("2026-05-12", "48712.34"), self._mut("2026-02-24", "48109.87")]
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(unsettled, [])
+        self.assertEqual(len(settled), 2)
+        self.assertEqual(settled[1].referenceDate, date(2026, 2, 25))
 
-        # Verify that all bank accounts have names set
-        assert len(result.bankAccount) == 2
-        for bank_account in result.bankAccount:
-            assert bank_account.bankAccountName is not None
-            assert bank_account.bankAccountName != ""
-            
-        # For configured accounts, the name should be the full account number
-        usd_account = next(ba for ba in result.bankAccount if ba.bankAccountCurrency == "USD")
-        eur_account = next(ba for ba in result.bankAccount if ba.bankAccountCurrency == "EUR")
-        
-        assert usd_account.bankAccountName == "CH123-456789"
-        assert eur_account.bankAccountName == "CH123-456789"
-        
-        # Bank account numbers should be set for configured accounts
-        assert usd_account.bankAccountNumber == "CH123-456789"
-        assert eur_account.bankAccountNumber == "CH123-456789"
+    def test_split_mixed(self):
+        stocks = [
+            self._bal("2025-01-01", "0"),
+            self._mut("2025-12-29", "500"),  # settles Dec 30 — settled
+            self._mut("2025-12-31", "1000"),  # settles Jan 2 2026 (skip Jan 1 holiday) — unsettled
+            self._bal("2026-01-01", "500"),
+        ]
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(len(settled), 3)  # opening bal + Dec29 mutation + closing bal
+        self.assertEqual(len(unsettled), 1)  # Dec31 mutation
+        self.assertEqual(unsettled[0].referenceDate, date(2025, 12, 31))
 
-    def test_bank_account_names_always_set_without_configured_accounts(self):
-        """Test that bank account names are set even when no accounts are configured."""
-        settings = []  # No configured accounts
-        
-        cash_pos = CashPosition(depot="999888", currentCy="USD", cash_account_id="cash999888", type="cash")
-        stock = SecurityStock(
-            referenceDate=date(2024, 1, 1),
-            mutation=False,
-            quotationType="PIECE",
-            quantity=Decimal(750),
-            balanceCurrency='USD'
+    def test_non_trade_mutation_never_unsettled(self):
+        """A mutation without requires_settlement=True (e.g. dividend, interest) is
+        always placed in the settled bucket even if it occurs on the last day."""
+        dividend = self._mut("2025-12-31", "50", requires_settlement=False)
+        stocks = [self._bal("2025-01-01", "0"), dividend, self._bal("2026-01-01", "50")]
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(len(unsettled), 0)
+        self.assertEqual(len(settled), 3)
+
+    def test_balance_entries_always_settled(self):
+        """Balance (non-mutation) entries always go to the settled bucket."""
+        stocks = [self._bal("2025-12-31", "999")]
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+        self.assertEqual(len(settled), 1)
+        self.assertEqual(len(unsettled), 0)
+
+    def test_intra_period_checkpoint_shifts_date(self):
+        """A trade on the last day of a quarterly period (Sep 30) settles Oct 1.
+        The Oct 1 balance snapshot (Q3 close_date_plus1) does NOT yet include it,
+        so split_unsettled_cash must shift the mutation's referenceDate to Oct 1
+        (settlement date) so it appears AFTER the Oct 1 balance checkpoint in the
+        reconciler's sorted sequence.  The trade is NOT put in the unsettled bucket."""
+        # Q3 close: Oct 1 balance present; period ends Dec 31
+        q3_close = self._bal("2025-10-01", "1000")  # Q3 settled balance (no T+1)
+        q4_close = self._bal("2026-01-01", "1500")  # year-end balance (includes settlement)
+        trade = self._mut("2025-09-30", "500")  # settles Oct 1 — intra-period unsettled
+        stocks = [q3_close, trade, q4_close]
+
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+
+        self.assertEqual(
+            len(unsettled), 0, "Intra-period unsettled trade must NOT go to separate account"
         )
-        
-        cash_tuples = [(cash_pos, [stock], [])]
-
-        result = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
-
-        # Verify bank account has name set
-        assert len(result.bankAccount) == 1
-        bank_account = result.bankAccount[0]
-        
-        assert bank_account.bankAccountName is not None
-        assert bank_account.bankAccountName != ""
-        
-        # For unconfigured accounts, the name should follow the pattern "USD Account ...999888"
-        assert bank_account.bankAccountName == "USD Account ...999888"
-        
-        # Bank account number should be None for unconfigured accounts
-        assert bank_account.bankAccountNumber is None
-
-    def test_bank_account_names_always_set_for_awards(self):
-        """Test that bank account names are set for awards accounts."""
-        settings = [
-            SchwabAccountSettings(account_number="CH999-IGNORE", account_name_alias="main", **self.default_settings_args)
-        ]  # Settings should be ignored for awards
-        
-        cash_pos = CashPosition(depot="AWARDS", cash_account_id="AWARD789", currentCy="USD", type="cash")
-        stock = SecurityStock(
-            referenceDate=date(2024, 1, 1),
-            mutation=False,
-            quotationType="PIECE",
-            quantity=Decimal(100),
-            balanceCurrency='USD'
+        self.assertEqual(len(settled), 3)
+        # The trade's referenceDate must have been shifted to the settlement date (Oct 1)
+        mutations = [s for s in settled if s.mutation]
+        self.assertEqual(len(mutations), 1)
+        self.assertEqual(
+            mutations[0].referenceDate,
+            date(2025, 10, 1),
+            "Trade referenceDate must be shifted to settlement date (Oct 1)",
         )
-        
-        cash_tuples = [(cash_pos, [stock], [])]
 
-        result = convert_cash_positions_to_list_of_bank_accounts(cash_tuples, self.period_to_date, settings)
+    def test_settled_trade_always_shifted_to_settlement_date(self):
+        """ALL T+1 mutations are unconditionally re-dated to settlement_date.
+        A Sep 29 trade settles Sep 30; even though Sep 30 < Oct 1 checkpoint,
+        the referenceDate is still shifted to Sep 30 (cash moves on settlement day)."""
+        q3_close = self._bal("2025-10-01", "1500")
+        trade = self._mut("2025-09-29", "500")  # settles Sep 30
+        stocks = [q3_close, trade]
 
-        # Verify bank account has name set
-        assert len(result.bankAccount) == 1
-        bank_account = result.bankAccount[0]
-        
-        assert bank_account.bankAccountName is not None
-        assert bank_account.bankAccountName != ""
-        
-        # For awards accounts, the name should follow the pattern "Equity Awards <award_id>"
-        assert bank_account.bankAccountName == "Equity Awards AWARD789"
-        
-        # Bank account number should be None for awards (no configured account number)
-        assert bank_account.bankAccountNumber is None
+        settled, unsettled = split_unsettled_cash(stocks, date(2025, 12, 31))
+
+        self.assertEqual(len(unsettled), 0)
+        mutations = [s for s in settled if s.mutation]
+        self.assertEqual(
+            mutations[0].referenceDate,
+            date(2025, 9, 30),
+            "referenceDate must be shifted to settlement date (Sep 30)",
+        )
+
+
+class TestUnsettledCashAccountGeneration(unittest.TestCase):
+    """End-to-end tests for the unsettled cash account generation."""
+
+    def _make_importer_with_mocks(self, mock_tx, mock_stmt, settings=None):
+        """Helper that sets up the mock patching and returns the tax statement."""
+        period_from = date(2025, 1, 1)
+        period_to = date(2025, 12, 31)
+        if settings is None:
+            settings = [
+                SchwabAccountSettings(
+                    account_number="AWARDS",
+                    account_name_alias="awards_alias",
+                    broker_name="schwab",
+                    canton="ZH",
+                    full_name="Test User",
+                )
+            ]
+        with patch(
+            'opensteuerauszug.importers.schwab.schwab_importer.TransactionExtractor'
+        ) as MockTX:
+            MockTX.return_value.extract_transactions.return_value = mock_tx
+            with patch(
+                'opensteuerauszug.importers.schwab.schwab_importer.StatementExtractor'
+            ) as MockStmt:
+                MockStmt.return_value.extract_positions.return_value = mock_stmt
+                importer = SchwabImporter(
+                    period_from=period_from,
+                    period_to=period_to,
+                    account_settings_list=settings,
+                    strict_consistency=True,
+                )
+                return importer.import_files(['dummy.json', 'dummy.pdf'])
+
+    def test_unsettled_trade_creates_separate_account(self):
+        """A trade on Dec 31 (settles Jan 1) should produce two accounts:
+        one settled (PDF balance = $0) and one unsettled ($1000)."""
+        period_from = date(2025, 1, 1)
+        period_to = date(2025, 12, 31)
+        depot = "AWARDS"
+        cash_pos = CashPosition(depot=depot, currentCy="USD", cash_account_id="GOOG")
+
+        opening = SecurityStock(
+            referenceDate=period_from,
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+        sale = SecurityStock(
+            referenceDate=period_to,
+            mutation=True,
+            quantity=Decimal("1000"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+            name="Sale proceeds",
+            requires_settlement=True,
+        )
+        # PDF reports $0 because trade hasn't settled
+        closing_pdf = SecurityStock(
+            referenceDate=period_to + timedelta(days=1),
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+
+        mock_tx = [(cash_pos, [sale], [], depot, (period_from, period_to))]
+        mock_stmt = (
+            [(cash_pos, opening), (cash_pos, closing_pdf)],
+            period_from,
+            period_to + timedelta(days=1),
+            depot,
+        )
+
+        tax_stmt = self._make_importer_with_mocks(mock_tx, mock_stmt)
+        accounts = tax_stmt.listOfBankAccounts.bankAccount
+
+        self.assertEqual(len(accounts), 2, "Expected main + unsettled account")
+
+        # Identify settled vs unsettled account by balance
+        balances = {a.taxValue.balance for a in accounts if a.taxValue}
+        self.assertIn(Decimal("0"), balances)  # settled (PDF) account
+        self.assertIn(Decimal("1000"), balances)  # unsettled account
+
+        # The unsettled account name should contain "(Unsettled)"
+        names = [str(a.bankAccountName) for a in accounts]
+        self.assertTrue(
+            any("Unsettled" in n for n in names),
+            f"Expected one name to contain 'Unsettled', got: {names}",
+        )
+
+    def test_fully_settled_trade_no_unsettled_account(self):
+        """A trade on Dec 29 (settles Dec 30) should NOT produce an unsettled account."""
+        period_from = date(2025, 1, 1)
+        period_to = date(2025, 12, 31)
+        depot = "AWARDS"
+        cash_pos = CashPosition(depot=depot, currentCy="USD", cash_account_id="GOOG")
+
+        opening = SecurityStock(
+            referenceDate=period_from,
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+        # Dec 29 is a Monday; settlement = Dec 30 ≤ Dec 31 → fully settled
+        sale = SecurityStock(
+            referenceDate=date(2025, 12, 29),
+            mutation=True,
+            quantity=Decimal("500"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+            requires_settlement=True,
+        )
+        # PDF correctly shows $500 (trade settled by year-end)
+        closing_pdf = SecurityStock(
+            referenceDate=period_to + timedelta(days=1),
+            mutation=False,
+            quantity=Decimal("500"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+
+        mock_tx = [(cash_pos, [sale], [], depot, (period_from, period_to))]
+        mock_stmt = (
+            [(cash_pos, opening), (cash_pos, closing_pdf)],
+            period_from,
+            period_to + timedelta(days=1),
+            depot,
+        )
+
+        tax_stmt = self._make_importer_with_mocks(mock_tx, mock_stmt)
+        accounts = tax_stmt.listOfBankAccounts.bankAccount
+
+        self.assertEqual(len(accounts), 1, "Expected only the main account (no unsettled)")
+        self.assertFalse(any("Unsettled" in str(a.bankAccountName) for a in accounts))
+
+    def test_unsettled_account_name_for_awards(self):
+        """The unsettled account for an awards position is named 'Equity Awards X (Unsettled)'."""
+        period_from = date(2025, 1, 1)
+        period_to = date(2025, 12, 31)
+        depot = "AWARDS"
+        cash_pos = CashPosition(depot=depot, currentCy="USD", cash_account_id="MSFT")
+
+        opening = SecurityStock(
+            referenceDate=period_from,
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+        # Dec 31 trade (Wed) settles Jan 1 → unsettled
+        sale = SecurityStock(
+            referenceDate=date(2025, 12, 31),
+            mutation=True,
+            quantity=Decimal("200"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+            requires_settlement=True,
+        )
+        closing_pdf = SecurityStock(
+            referenceDate=period_to + timedelta(days=1),
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+
+        mock_tx = [(cash_pos, [sale], [], depot, (period_from, period_to))]
+        mock_stmt = (
+            [(cash_pos, opening), (cash_pos, closing_pdf)],
+            period_from,
+            period_to + timedelta(days=1),
+            depot,
+        )
+
+        tax_stmt = self._make_importer_with_mocks(mock_tx, mock_stmt)
+        accounts = tax_stmt.listOfBankAccounts.bankAccount
+
+        unsettled_names = [
+            str(a.bankAccountName) for a in accounts if "Unsettled" in str(a.bankAccountName)
+        ]
+        self.assertEqual(len(unsettled_names), 1)
+        self.assertIn("Equity Awards MSFT", unsettled_names[0])
+        self.assertIn("Unsettled", unsettled_names[0])
+
+    def test_multiple_unsettled_trades_merged_into_one_account(self):
+        """Multiple unsettled trades at period end → one unsettled account with summed balance."""
+        period_from = date(2025, 1, 1)
+        period_to = date(2025, 12, 31)
+        depot = "AWARDS"
+        cash_pos = CashPosition(depot=depot, currentCy="USD", cash_account_id="GOOG")
+
+        opening = SecurityStock(
+            referenceDate=period_from,
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+        # Two unsettled trades on Dec 31 (Wed → settles Jan 1)
+        sale1 = SecurityStock(
+            referenceDate=date(2025, 12, 31),
+            mutation=True,
+            quantity=Decimal("600"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+            requires_settlement=True,
+        )
+        sale2 = SecurityStock(
+            referenceDate=date(2025, 12, 31),
+            mutation=True,
+            quantity=Decimal("400"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+            requires_settlement=True,
+        )
+        closing_pdf = SecurityStock(
+            referenceDate=period_to + timedelta(days=1),
+            mutation=False,
+            quantity=Decimal("0"),
+            balanceCurrency="USD",
+            quotationType="PIECE",
+        )
+
+        mock_tx = [(cash_pos, [sale1, sale2], [], depot, (period_from, period_to))]
+        mock_stmt = (
+            [(cash_pos, opening), (cash_pos, closing_pdf)],
+            period_from,
+            period_to + timedelta(days=1),
+            depot,
+        )
+
+        tax_stmt = self._make_importer_with_mocks(mock_tx, mock_stmt)
+        accounts = tax_stmt.listOfBankAccounts.bankAccount
+
+        self.assertEqual(len(accounts), 2)
+        unsettled_accounts = [
+            a for a in accounts if a.taxValue and a.taxValue.balance == Decimal("1000")
+        ]
+        self.assertEqual(
+            len(unsettled_accounts), 1, "Both unsettled trades should sum to 1000 in one account"
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

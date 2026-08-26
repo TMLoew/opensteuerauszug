@@ -1,12 +1,13 @@
 from datetime import date, timedelta
-from bisect import bisect_left, bisect_right
 from typing import List, Tuple
+
 
 class DateRangeCoverage:
     """
     Utility to track coverage of date ranges and check if a given range is fully covered.
     Date ranges are inclusive of both begin and end.
     """
+
     def __init__(self):
         # Store covered ranges as a sorted, non-overlapping list of (begin, end) tuples
         self.covered: List[Tuple[date, date]] = []
@@ -58,4 +59,4 @@ class DateRangeCoverage:
         for b, e in self.covered:
             if b <= d <= e:
                 return (b, e)
-        return None 
+        return None

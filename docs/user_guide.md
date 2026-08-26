@@ -8,6 +8,37 @@ The primary goal is to simplify the process of preparing your tax return by auto
 
 This guide will walk you through the necessary steps to use OpenSteuerAuszug effectively.
 
+## Quick Start
+
+If your broker export is ready, this is the shortest path:
+
+Install `uv` first (it can also install/manage Python for you):
+https://docs.astral.sh/uv/getting-started/installation/
+
+```bash
+# One-time install of the CLI via uv
+uv tool install --from git+https://github.com/vroonhof/opensteuerauszug.git opensteuerauszug
+
+# Then run normally
+opensteuerauszug kursliste download --year 2025
+
+opensteuerauszug process path/to/broker_export.xml \
+  --importer ibkr \
+  --tax-year 2025 \
+  -o steuerauszug_2025.pdf
+```
+
+If you prefer not to install the tool, `uv run --with git+https://github.com/vroonhof/opensteuerauszug.git opensteuerauszug ...`
+also works for one-off commands.
+
+You can replace `ibkr` with `schwab`, `fidelity`, or `degiro` depending on your source data.
+
+Prefer not to install anything? Download the standalone web app (a single
+HTML file that runs entirely in your browser) and follow the on-screen
+wizard instead — see the [web app guide](webapp.md).
+
+The rest of this guide explains each step in detail.
+
 ## Short Primer on Tax data and calculations
 
 ### What data are we aiming for
@@ -64,44 +95,6 @@ Using OpenSteuerAuszug to generate your Steuerauszug generally involves the foll
     * Remove any manual entries you may have used in previous years.
     * **Recalculate the tax information using the tax software**. Most tax software offers the ability to recompute tax values based on the latest Kursliste, accept that option.
 
-## Features
-
-### Payment Reconciliation
-
-OpenSteuerAuszug includes a powerful **Payment Reconciliation** feature (enabled by default). 
-
-When you run the tool with Kursliste data, it automatically compares the dividends and withholding taxes reported by your broker against the official values expected from the Kursliste for each security.
-
-*   **Discrepancy Reporting**: It identifies cases where the broker's reported income or withholding tax differs from the Kursliste.
-*   **DA-1 Confidence**: The reconciliation tables are particularly useful for building confidence that foreign withholding tax (e.g., US withholding on dividends) has actually occurred and matches the expected rates. This is essential when claiming tax credits via the **DA-1 form** in your Swiss tax return.
-*   **Detailed Tables**: The generated PDF includes reconciliation tables showing these comparisons, making it easy to spot missing dividends or incorrect tax withholdings.
-*   **Automatic Match Detection**: It accounts for common scenarios like accumulating funds (where no cash flow is expected) and small rounding differences.
-
-You can explicitly control this feature using:
-*   `--payment-reconciliation`: (Default) Enables the reconciliation phase and reports.
-*   `--no-payment-reconciliation`: Skips the reconciliation step.
-
-### Appending Additional Documents
-
-Often, you may want to include additional supporting documents (e.g., the original broker statement, US 1042-S forms, or other tax forms) in the same PDF as your Steuerauszug for archiving or submission purposes.
-
-OpenSteuerAuszug provides command-line options to prepend or append existing PDF files to the generated tax statement:
-
-*   `--pre-amble <file.pdf>`: Adds the specified PDF **before** the main tax statement.
-*   `--post-amble <file.pdf>`: Adds the specified PDF **after** the main tax statement.
-
-You can specify these options multiple times to add multiple files. The files will be added in the order they appear on the command line.
-
-**Note:** This feature performs a "naive concatenation." The added pages are attached exactly as they are; no page numbers, barcodes, or headers/footers are added or modified on these external documents.
-
-Example:
-```bash
-python -m opensteuerauszug.steuerauszug input.xml --importer ibkr \
-  --post-amble 1042-S_form.pdf \
-  --post-amble broker_statement.pdf \
-  -o final_tax_statement.pdf
-```
-
 ## Disclaimer and User Responsibility
 
 **Important**: OpenSteuerAuszug is provided "as is" without any formal audit or warranty. While it aims to be accurate, it is your responsibility as the taxpayer to:
@@ -127,7 +120,7 @@ You need the official Kursliste XML file for the relevant tax year.
 OpenSteuerAuszug can automatically download, prepare, and convert the latest Kursliste for you. This is the simplest method.
 
 ```bash
-python -m opensteuerauszug.kursliste download --year 2024
+opensteuerauszug kursliste download --year 2024
 ```
 
 This command performs the following steps:
@@ -137,7 +130,8 @@ This command performs the following steps:
 
 You can disable the automatic conversion with the `--no-convert` flag if desired.
 
-#### Manual Download and Conversion
+<details>
+<summary>Manual Kursliste download/conversion (optional fallback)</summary>
 
 If you prefer to obtain the file manually or need to process a specific file:
 
@@ -152,17 +146,48 @@ If you prefer to obtain the file manually or need to process a specific file:
 3.  **Convert (Recommended)**:
     *   For performance, convert the XML to SQLite using the integrated command:
         ```bash
-        python -m opensteuerauszug.kursliste convert path/to/kursliste_2023.xml
+        opensteuerauszug kursliste convert path/to/kursliste_2023.xml
         ```
     *   This will create `kursliste_2023.sqlite` next to the XML file.
 
 *(Note: A legacy script `scripts/convert_kursliste_to_sqlite.py` is also available but the CLI command is preferred.)*
+
+</details>
 
 ### Storing the Kursliste
 
 Place the downloaded Kursliste XML file(s) and generated SQLite database(s) into the XDG data directory or locally in `data/kursliste/`. The application will automatically detect files in these locations, prioritizing the XDG directory.
 
 For more detailed information on naming conventions and how OpenSteuerAuszug manages these files, please refer to the [Kursliste Data Management Guide](data/kursliste/kursliste.md).
+
+### Stock not found in the Kursliste
+
+If a stock cannot be found in the Kursliste you can request the addition of the security directly from the Swiss Federal Tax Administration.
+
+Send an email with the ISIN and company name to:
+
+- dvs at estv.admin.ch  
+
+Example email:
+
+        
+        Sehr geehrte Damen und Herren,
+        
+        ich möchte höflich anfragen, ob die folgenden Wertpapiere in die Kursliste aufgenommen werden können, da sie derzeit in der Steuer-Software nicht gefunden werden.
+        
+        ISIN: US0123456789 – Company ABC Inc. (ABC)
+        
+        Vielen Dank für Ihre Unterstützung.
+        
+        Freundliche Grüße
+        [Your Name]
+        
+The securities may appear on the ESTV website quite quickly after the request by email.  
+The XML Kursliste is updated regularly:
+
+- Weekly on Friday until calendar week (CW) 14
+- Every two weeks afterwards
+- Every four weeks starting from CW 28        
 
 ---
 
@@ -203,6 +228,8 @@ Currently supported brokers and their specific guides:
 
 *   **[Charles Schwab](importer_schwab.md)**: For brokerage and equity award accounts.
 *   **[Interactive Brokers (IBKR)](importer_ibkr.md)**: For brokerage accounts.
+*   **[Fidelity Investments](importer_fidelity.md)**: For brokerage accounts.
+*   **[DEGIRO](importer_degiro.md)**: For brokerage accounts.
 
 Please refer to the documentation for your specific broker by clicking the links above to understand what files to download, their formats, and any specific configurations required in `config.toml`.
 
@@ -250,16 +277,44 @@ Neither of the following options is currently complete and should not be used.
 One all the data is setup the Steuerauszug can be generated with
 
 ```console
-python -m opensteuerauszug.steuerauszug {broker data location} --importer {schwab|ibkr} --tax-year {tax year} -o {output filename.pdf} 
+opensteuerauszug process {broker data location} --importer {schwab|ibkr|fidelity|degiro} --tax-year {tax year} -o {output filename.pdf}
 ```
 
 for minimal mode
 
 ```console
-python -m opensteuerauszug.steuerauszug {broker data location} --importer {schwab|ibkr} --tax-calculation-level minimal --tax-year {tax year} -o {output filename.pdf} 
+opensteuerauszug process {broker data location} --importer {schwab|ibkr|fidelity|degiro} --tax-calculation-level minimal --tax-year {tax year} -o {output filename.pdf}
 ```
 
 If doing active development it is best to place any real tax data including the generated output outside of the source tree or in the `/private` directory. 
+
+## Features and optional extras
+
+### Payment Reconciliation (default)
+
+When Kursliste data is available, OpenSteuerAuszug automatically reconciles broker-reported
+dividends and withholding taxes against expected values.
+
+This is mainly useful as a confidence check (especially for DA-1 relevant withholding), and
+the generated PDF includes reconciliation tables that help spot mismatches quickly.
+
+### Appending Additional Documents
+
+You can prepend/append supporting PDFs (for example a broker statement or 1042-S form):
+
+*   `--pre-amble <file.pdf>`: add pages before the generated statement.
+*   `--post-amble <file.pdf>`: add pages after the generated statement.
+
+Example:
+
+```bash
+opensteuerauszug process input.xml --importer ibkr --tax-year 2025 \
+  --post-amble 1042-S_form.pdf \
+  --post-amble broker_statement.pdf \
+  -o final_tax_statement.pdf
+```
+
+**Note:** This is a straightforward concatenation. Added pages are not re-formatted and do not receive generated headers/footers or barcodes.
 
 ---
 
@@ -328,7 +383,7 @@ but because the author wisely decided to finish their tax return before embarkin
 * Recruit more testers fro real world data use.
 * Implement plausibility checks, in particular for tax withholding.
 * produce more automated test scenarios.
-* See if this can be deployed as a standalone web pages with WASM.
+* ~~See if this can be deployed as a standalone web pages with WASM.~~ Done — see the [web app guide](webapp.md).
 * Cleanup helper scripts and provide clean pipx executable package
 
 

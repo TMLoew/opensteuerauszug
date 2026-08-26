@@ -41,7 +41,8 @@ def render_workbook(data: TaxOverviewData) -> Workbook:
     # openpyxl starts with a default "Sheet"; remove before adding ours so the
     # tab order is exactly as specified.
     default = wb.active
-    wb.remove(default)
+    if default is not None:
+        wb.remove(default)
 
     register_named_styles(wb)
 

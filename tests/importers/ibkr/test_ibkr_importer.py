@@ -12,16 +12,8 @@ from opensteuerauszug.importers.ibkr.ibkr_importer import (
 )
 from opensteuerauszug.config.models import IbkrAccountSettings
 from opensteuerauszug.model.ech0196 import (
-    TaxStatement,
-    ListOfSecurities,
-    ListOfBankAccounts,
-    Security,
-    BankAccount,
-    QuotationType,
-    CurrencyId,
     Client,
 )
-from opensteuerauszug.core.constants import UNINITIALIZED_QUANTITY
 
 # Check if ibflex is available, skip tests if not
 try:
@@ -66,6 +58,7 @@ def test_invariant_missing_account_detail_entry_is_not_skipped():
     assert not should_skip_pseudo_account_entry(
         DummyIbkrEntry(account_id=None, level_of_detail="DETAIL")
     )
+
 
 # Define a basic sample IBKR Flex Query XML as a string
 SAMPLE_IBKR_FLEX_XML_VALID = """
@@ -377,6 +370,8 @@ def test_ibkr_import_valid_xml(sample_ibkr_settings):
         assert msft_sec.stock[1].mutation is False
         assert msft_sec.stock[1].referenceDate == date(2024, 1, 1)
         assert msft_sec.stock[1].quantity == Decimal("10")
+        assert msft_sec.stock[1].unitPrice == Decimal("300.00")
+        assert msft_sec.stock[1].balance == Decimal("3000.00")
         assert all(s.referenceDate != date(2023, 12, 31) for s in msft_sec.stock)
 
         # Divdend fom cash transaction should be mapped to SecurityPayment
@@ -524,8 +519,8 @@ def test_ibkr_import_skips_hyphen_account_entries(sample_ibkr_settings):
             os.remove(xml_file_path)
 
 
-def test_security_payment_quantity_is_minus_one(sample_ibkr_settings):
-    """Test that SecurityPayment.quantity is set to -1 for payments derived from CashTransactions."""
+def test_security_payment_quantity_is_none_before_cleanup(sample_ibkr_settings):
+    """Test that SecurityPayment.quantity is None for payments derived from CashTransactions (set by cleanup)."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
 
@@ -576,13 +571,19 @@ def test_security_payment_quantity_is_minus_one(sample_ibkr_settings):
 
         assert msft_security is not None, "MSFT security not found"
         assert msft_security.payment is not None, "MSFT security should have payments"
-        assert len(msft_security.payment) == 2, "MSFT security should have two payments (dividend and tax)"
+        assert (
+            len(msft_security.payment) == 2
+        ), "MSFT security should have two payments (dividend and tax)"
 
         for payment in msft_security.payment:
             if payment.name == "MSFT Corp Dividend":
-                assert payment.quantity == UNINITIALIZED_QUANTITY, f"Dividend payment quantity for {payment.name} should be UNINITIALIZED_QUANTITY"
+                assert (
+                    payment.quantity is None
+                ), f"Dividend payment quantity for {payment.name} should be None before cleanup"
             elif payment.name == "Tax on MSFT Dividend":
-                assert payment.quantity == UNINITIALIZED_QUANTITY, f"Tax payment quantity for {payment.name} should be UNINITIALIZED_QUANTITY"
+                assert (
+                    payment.quantity is None
+                ), f"Tax payment quantity for {payment.name} should be None before cleanup"
                 assert payment.nonRecoverableTax is None
                 assert payment.nonRecoverableTaxAmountOriginal == Decimal("1.85")
                 assert payment.broker_label_original == "Withholding Tax"
@@ -591,6 +592,77 @@ def test_security_payment_quantity_is_minus_one(sample_ibkr_settings):
 
     finally:
         if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+def test_withholding_tax_reversal_nets_against_withholding(sample_ibkr_settings):
+    """A positive 'Withholding Tax' entry (reversal/correction) should reduce the withholding
+    total, not be added to dividend income. Reproduces the 30%->15% correction scenario."""
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    importer = IbkrImporter(
+        period_from=period_from, period_to=period_to, account_settings_list=sample_ibkr_settings
+    )
+
+    xml_content = """
+<FlexQueryResponse queryName="WhtaxReversalTest" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <Trades>
+        <Trade transactionID="9001" accountId="U1234567" assetCategory="STK" symbol="VT" description="VANGUARD TOTAL WORLD STOCK ETF" conid="123456" isin="US9220427424" currency="USD" quantity="90" tradeDate="2024-01-15" settleDateTarget="2024-01-17" tradePrice="100.00" tradeMoney="9000.00" buySell="BUY" ibCommission="-1.00" netCash="-9001.00" />
+      </Trades>
+      <CashTransactions>
+        <CashTransaction accountId="U1234567" type="Dividends" currency="USD" amount="34.67" description="VT(US9220427424) Cash Dividend USD 0.3852 per Share (Ordinary Dividend)" conid="123456" symbol="VT" isin="US9220427424" dateTime="20250325;202000" assetCategory="STK" />
+        <CashTransaction accountId="U1234567" type="Withholding Tax" currency="USD" amount="-10.40" description="VT(US9220427424) Cash Dividend USD 0.3852 per Share - US Tax" conid="123456" symbol="VT" isin="US9220427424" dateTime="20250325;202000" assetCategory="STK" />
+        <CashTransaction accountId="U1234567" type="Withholding Tax" currency="USD" amount="10.40" description="VT(US9220427424) Cash Dividend USD 0.3852 per Share - US Tax" conid="123456" symbol="VT" isin="US9220427424" dateTime="20250325;202000" assetCategory="STK" />
+        <CashTransaction accountId="U1234567" type="Withholding Tax" currency="USD" amount="-5.20" description="VT(US9220427424) Cash Dividend USD 0.3852 per Share - US Tax" conid="123456" symbol="VT" isin="US9220427424" dateTime="20250325;202000" assetCategory="STK" />
+      </CashTransactions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="19.07" />
+      </CashReport>
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="VT" description="VANGUARD TOTAL WORLD STOCK ETF" conid="123456" isin="US9220427424" currency="USD" position="90" markPrice="110.00" positionValue="9900.00" reportDate="2025-12-31" />
+      </OpenPositions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    xml_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as tmp:
+            tmp.write(xml_content)
+            xml_file_path = tmp.name
+
+        tax_statement = importer.import_files([xml_file_path])
+        depot = tax_statement.listOfSecurities.depot[0]
+        vt = next((s for s in depot.security if s.isin == "US9220427424"), None)
+        assert vt is not None, 'Security with ISIN "US9220427424" not found in depot'
+
+        assert len(vt.payment) == 4
+
+        payments_by_amount = {p.amount: p for p in vt.payment}
+
+        # Dividend entry: amount set, no withholding fields
+        div = payments_by_amount[Decimal("34.67")]
+        assert div.nonRecoverableTaxAmountOriginal is None
+        assert div.withHoldingTaxClaim is None
+
+        # Initial withholding (-10.40): nonRecoverableTaxAmountOriginal = +10.40
+        wht_initial = payments_by_amount[Decimal("-10.40")]
+        assert wht_initial.nonRecoverableTaxAmountOriginal == Decimal("10.40")
+
+        # Withholding reversal (+10.40): nonRecoverableTaxAmountOriginal = -10.40 (reduces withholding)
+        wht_reversal = payments_by_amount[Decimal("10.40")]
+        assert wht_reversal.nonRecoverableTaxAmountOriginal == Decimal("-10.40")
+        assert wht_reversal.grossRevenueB is None
+
+        # Corrected withholding (-5.20): nonRecoverableTaxAmountOriginal = +5.20
+        wht_corrected = payments_by_amount[Decimal("-5.20")]
+        assert wht_corrected.nonRecoverableTaxAmountOriginal == Decimal("5.20")
+
+    finally:
+        if xml_file_path is not None and os.path.exists(xml_file_path):
             os.remove(xml_file_path)
 
 
@@ -652,7 +724,7 @@ def test_transfer_quantity_sign_mismatch(sample_ibkr_settings):
 def test_transfer_with_open_position_no_trades(sample_ibkr_settings):
     """
     Test inbound position transfer with no other transactions.
-    
+
     When there is only an inbound transfer (FOP) with an OpenPosition at year-end
     but no other trades, the position should be correctly tracked with:
     - Opening balance of 0 at period start
@@ -678,10 +750,10 @@ def test_transfer_with_open_position_no_trades(sample_ibkr_settings):
         # Verify securities were created
         assert tax_statement.listOfSecurities is not None
         assert len(tax_statement.listOfSecurities.depot) == 1
-        
+
         depot = tax_statement.listOfSecurities.depot[0]
         assert depot.depotNumber == "U1234567"
-        
+
         # Find the IWDA security
         iwda_sec = next(
             (s for s in depot.security if s.isin == "IE00B4L5Y983"),
@@ -690,18 +762,22 @@ def test_transfer_with_open_position_no_trades(sample_ibkr_settings):
         assert iwda_sec is not None, "IWDA security should be present"
         assert iwda_sec.currency == "EUR"
         assert iwda_sec.country == "IE"
-        
+
         # Check stock entries: should have a transfer mutation and a closing balance (no opening balance at period start)
-        assert len(iwda_sec.stock) == 2, f"Expected 2 stock entries (transfer, closing), got {len(iwda_sec.stock)}"
-        
+        assert (
+            len(iwda_sec.stock) == 2
+        ), f"Expected 2 stock entries (transfer, closing), got {len(iwda_sec.stock)}"
+
         # Transfer mutation should exist
         transfer_mutations = [s for s in iwda_sec.stock if s.mutation]
         assert len(transfer_mutations) == 1, "Should have exactly one transfer mutation"
         transfer = transfer_mutations[0]
-        assert transfer.quantity == Decimal("13"), f"Transfer quantity should be 13, got {transfer.quantity}"
+        assert transfer.quantity == Decimal(
+            "13"
+        ), f"Transfer quantity should be 13, got {transfer.quantity}"
         assert transfer.referenceDate == date(2025, 8, 13), "Transfer date should be 2025-08-13"
         assert "FOP" in transfer.name, f"Transfer name should contain 'FOP', got {transfer.name}"
-        
+
         # Closing balance at period end + 1 should be 13
         end_plus_one = period_to + timedelta(days=1)
         closing_balance = next(
@@ -709,8 +785,10 @@ def test_transfer_with_open_position_no_trades(sample_ibkr_settings):
             None,
         )
         assert closing_balance is not None, "Closing balance entry should exist"
-        assert closing_balance.quantity == Decimal("13"), f"Closing balance should be 13, got {closing_balance.quantity}"
-        
+        assert closing_balance.quantity == Decimal(
+            "13"
+        ), f"Closing balance should be 13, got {closing_balance.quantity}"
+
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
@@ -719,7 +797,7 @@ def test_transfer_with_open_position_no_trades(sample_ibkr_settings):
 def test_open_position_only_no_mutations(sample_ibkr_settings):
     """
     Test OpenPosition only with no mutations.
-    
+
     When there is only an OpenPosition at year-end but no trades, transfers or
     corporate actions (e.g., position was transferred in a previous year),
     the position should be correctly tracked with:
@@ -745,32 +823,36 @@ def test_open_position_only_no_mutations(sample_ibkr_settings):
         # Verify securities were created
         assert tax_statement.listOfSecurities is not None
         assert len(tax_statement.listOfSecurities.depot) == 1
-        
+
         depot = tax_statement.listOfSecurities.depot[0]
-        
+
         # Find the IWDA security
         iwda_sec = next(
             (s for s in depot.security if s.isin == "IE00B4L5Y983"),
             None,
         )
         assert iwda_sec is not None, "IWDA security should be present"
-        
+
         # Check stock entries: should have opening balance and closing balance only
         # No mutations since there were no trades/transfers/corporate actions
         mutations = [s for s in iwda_sec.stock if s.mutation]
         assert len(mutations) == 0, "Should have no mutations"
-        
+
         balances = [s for s in iwda_sec.stock if not s.mutation]
-        assert len(balances) == 2, f"Should have 2 balance entries (opening and closing), got {len(balances)}"
-        
+        assert (
+            len(balances) == 2
+        ), f"Should have 2 balance entries (opening and closing), got {len(balances)}"
+
         # Opening balance at period start should be 13 (same as closing, no changes)
         opening_balance = next(
             (s for s in iwda_sec.stock if not s.mutation and s.referenceDate == period_from),
             None,
         )
         assert opening_balance is not None, "Opening balance entry should exist"
-        assert opening_balance.quantity == Decimal("13"), f"Opening balance should be 13, got {opening_balance.quantity}"
-        
+        assert opening_balance.quantity == Decimal(
+            "13"
+        ), f"Opening balance should be 13, got {opening_balance.quantity}"
+
         # Closing balance at period end + 1 should be 13
         end_plus_one = period_to + timedelta(days=1)
         closing_balance = next(
@@ -778,8 +860,12 @@ def test_open_position_only_no_mutations(sample_ibkr_settings):
             None,
         )
         assert closing_balance is not None, "Closing balance entry should exist"
-        assert closing_balance.quantity == Decimal("13"), f"Closing balance should be 13, got {closing_balance.quantity}"
-        
+        assert closing_balance.quantity == Decimal(
+            "13"
+        ), f"Closing balance should be 13, got {closing_balance.quantity}"
+        assert closing_balance.unitPrice == Decimal("111.53")
+        assert closing_balance.balance == Decimal("1449.89")
+
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
@@ -932,6 +1018,7 @@ def test_cash_transaction_security_interest_assert(sample_ibkr_settings):
 #   And then assert only 1 payment (Initial Deposit) in the BankAccount.
 #   assert len(usd_account.payment) == 1
 
+# fmt: off
 # Parameterized test data for client information
 CLIENT_INFO_TEST_CASES = [
     # Scenario 1: name provided
@@ -952,43 +1039,44 @@ CLIENT_INFO_TEST_CASES = [
         "expected_last_name": "Smith",
         "description": "different name present in AccountInformation",
     },
-    # Scenario 3: No name provided, client should not be created
+    # Scenario 3: No name provided; client is still created from accountId
     {
         "account_info_xml": """
           <AccountInformation accountId="U9876545" acctAlias="Third Alias" />""",
-        "expected_client_number": None,  # client object should not be created
+        "expected_client_number": "U9876545",
         "expected_first_name": None,
         "expected_last_name": None,
-        "description": "No name field present, client should be None",
+        "description": "No name field present, client should include accountId",
     },
-    # Scenario 4: Empty name provided, client should not be created
+    # Scenario 4: Empty name provided; client is still created from accountId
     {
         "account_info_xml": """
           <AccountInformation accountId="U9876546" acctAlias="Fourth Alias" name="" />""",
-        "expected_client_number": None,  # client object should not be created due to empty name
+        "expected_client_number": "U9876546",
         "expected_first_name": None,
         "expected_last_name": None,
-        "description": "Empty name field present, client should be None",
+        "description": "Empty name field present, client should include accountId",
     },
-    # Scenario 5: Whitespace-only name provided, client should not be created
+    # Scenario 5: Whitespace-only name provided; client is still created from accountId
     {
         "account_info_xml": """
           <AccountInformation accountId="U9876547" acctAlias="Fifth Alias" name="   " />""",
-        "expected_client_number": None,  # client object should not be created due to whitespace-only name
+        "expected_client_number": "U9876547",
         "expected_first_name": None,
         "expected_last_name": None,
-        "description": "Whitespace-only name field present, client should be None",
+        "description": "Whitespace-only name field present, client should include accountId",
     },
-    # Scenario 6: Other attributes present but no name
+    # Scenario 6: Other attributes present but no name; client is still created from accountId
     {
         "account_info_xml": """
           <AccountInformation accountId="U9876548" acctAlias="Sixth Alias" street="123 Main St" city="New York" />""",
-        "expected_client_number": None,  # client object should not be created
+        "expected_client_number": "U9876548",
         "expected_first_name": None,
         "expected_last_name": None,
-        "description": "Other attributes present but no name field, client should be None",
+        "description": "Other attributes present but no name field, client should include accountId",
     },
 ]
+# fmt: on
 
 
 @pytest.mark.parametrize("client_data", CLIENT_INFO_TEST_CASES)
@@ -1179,14 +1267,16 @@ def test_base_summary_currency_filtered_out(sample_ibkr_settings):
         assert "BASE_SUMMARY" not in currencies
 
         # Verify account numbers don't contain BASE_SUMMARY
-        account_numbers = {str(ba.bankAccountNumber) for ba in bank_accounts if ba.bankAccountNumber}
+        account_numbers = {
+            str(ba.bankAccountNumber) for ba in bank_accounts if ba.bankAccountNumber
+        }
         base_summary_accounts = {num for num in account_numbers if "BASE_SUMMARY" in num}
         assert len(base_summary_accounts) == 0
 
         # Verify we can find the expected accounts
         usd_account = next((ba for ba in bank_accounts if ba.bankAccountCurrency == "USD"), None)
         eur_account = next((ba for ba in bank_accounts if ba.bankAccountCurrency == "EUR"), None)
-        
+
         assert usd_account is not None
         assert eur_account is not None
         assert usd_account.bankAccountNumber == "U1234567-USD"
@@ -1269,7 +1359,7 @@ def test_bank_account_names_always_set(sample_ibkr_settings):
     """Test that bank account names are always set for all currencies with closing balances."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
-    
+
     importer = IbkrImporter(
         period_from=period_from,
         period_to=period_to,
@@ -1309,25 +1399,35 @@ def test_bank_account_names_always_set(sample_ibkr_settings):
         for bank_account in tax_statement.listOfBankAccounts.bankAccount:
             assert bank_account.bankAccountName is not None
             assert bank_account.bankAccountName != ""
-            
+
             # Check the naming pattern: "<AccountId> <Currency> position"
             currency = bank_account.bankAccountCurrency
-            expected_name = f"U7890123 {currency} position"
+            expected_name = f"U7890123 {currency}"
             assert bank_account.bankAccountName == expected_name
 
         # Verify specific accounts
-        currencies_found = {ba.bankAccountCurrency for ba in tax_statement.listOfBankAccounts.bankAccount}
+        currencies_found = {
+            ba.bankAccountCurrency for ba in tax_statement.listOfBankAccounts.bankAccount
+        }
         assert currencies_found == {"USD", "EUR", "GBP"}
 
         # Verify USD account has interest payment
-        usd_account = next(ba for ba in tax_statement.listOfBankAccounts.bankAccount if ba.bankAccountCurrency == "USD")
+        usd_account = next(
+            ba
+            for ba in tax_statement.listOfBankAccounts.bankAccount
+            if ba.bankAccountCurrency == "USD"
+        )
         assert len(usd_account.payment) == 1
         assert usd_account.payment[0].name == "Interest on USD Cash"
 
         # Verify EUR account has no payments but still has name
-        eur_account = next(ba for ba in tax_statement.listOfBankAccounts.bankAccount if ba.bankAccountCurrency == "EUR")
+        eur_account = next(
+            ba
+            for ba in tax_statement.listOfBankAccounts.bankAccount
+            if ba.bankAccountCurrency == "EUR"
+        )
         assert len(eur_account.payment) == 0
-        assert eur_account.bankAccountName == "U7890123 EUR position"
+        assert eur_account.bankAccountName == "U7890123 EUR"
 
     finally:
         if os.path.exists(xml_file_path):
@@ -1338,7 +1438,7 @@ def test_ibkr_import_canton_extraction(sample_ibkr_settings):
     """Test that canton is extracted from IBKR stateResidentialAddress."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
-    
+
     # Create XML with AccountInformation containing stateResidentialAddress
     xml_with_canton = """
 <FlexQueryResponse queryName="TestQuery" type="AF">
@@ -1358,27 +1458,27 @@ def test_ibkr_import_canton_extraction(sample_ibkr_settings):
   </FlexStatements>
 </FlexQueryResponse>
 """
-    
+
     importer = IbkrImporter(
         period_from=period_from, period_to=period_to, account_settings_list=sample_ibkr_settings
     )
-    
+
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
         tmp_file.write(xml_with_canton)
         xml_file_path = tmp_file.name
-    
+
     try:
         tax_statement = importer.import_files([xml_file_path])
         assert tax_statement is not None
-        
+
         # Verify canton was extracted and set
         assert tax_statement.canton == "ZH"
-        
+
         # Verify client was created (from name field)
         assert tax_statement.client is not None
         assert len(tax_statement.client) == 1
         assert tax_statement.client[0].lastName == "Doe"
-        
+
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
@@ -1388,9 +1488,9 @@ def test_ibkr_import_canton_extraction_different_cantons(sample_ibkr_settings):
     """Test canton extraction works with different Swiss cantons."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
-    
+
     test_cantons = ["ZH", "BE", "GE", "VD", "ZG", "TI"]
-    
+
     for canton in test_cantons:
         xml_content = f"""
 <FlexQueryResponse queryName="TestQuery" type="AF">
@@ -1406,19 +1506,21 @@ def test_ibkr_import_canton_extraction_different_cantons(sample_ibkr_settings):
   </FlexStatements>
 </FlexQueryResponse>
 """
-        
+
         importer = IbkrImporter(
             period_from=period_from, period_to=period_to, account_settings_list=sample_ibkr_settings
         )
-        
+
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
             tmp_file.write(xml_content)
             xml_file_path = tmp_file.name
-        
+
         try:
             tax_statement = importer.import_files([xml_file_path])
             assert tax_statement is not None
-            assert tax_statement.canton == canton, f"Expected canton {canton}, got {tax_statement.canton}"
+            assert (
+                tax_statement.canton == canton
+            ), f"Expected canton {canton}, got {tax_statement.canton}"
         finally:
             if os.path.exists(xml_file_path):
                 os.remove(xml_file_path)
@@ -1428,7 +1530,7 @@ def test_ibkr_import_canton_extraction_invalid_format(sample_ibkr_settings):
     """Test that invalid canton formats are handled gracefully."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
-    
+
     # Test with non-CH country code
     xml_with_invalid_country = """
 <FlexQueryResponse queryName="TestQuery" type="AF">
@@ -1444,15 +1546,15 @@ def test_ibkr_import_canton_extraction_invalid_format(sample_ibkr_settings):
   </FlexStatements>
 </FlexQueryResponse>
 """
-    
+
     importer = IbkrImporter(
         period_from=period_from, period_to=period_to, account_settings_list=sample_ibkr_settings
     )
-    
+
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
         tmp_file.write(xml_with_invalid_country)
         xml_file_path = tmp_file.name
-    
+
     try:
         tax_statement = importer.import_files([xml_file_path])
         assert tax_statement is not None
@@ -1467,7 +1569,7 @@ def test_ibkr_import_canton_extraction_invalid_swiss_canton(sample_ibkr_settings
     """Test that invalid Swiss canton codes are handled gracefully."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
-    
+
     # Test with invalid Swiss canton code
     xml_with_invalid_canton = """
 <FlexQueryResponse queryName="TestQuery" type="AF">
@@ -1483,15 +1585,15 @@ def test_ibkr_import_canton_extraction_invalid_swiss_canton(sample_ibkr_settings
   </FlexStatements>
 </FlexQueryResponse>
 """
-    
+
     importer = IbkrImporter(
         period_from=period_from, period_to=period_to, account_settings_list=sample_ibkr_settings
     )
-    
+
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
         tmp_file.write(xml_with_invalid_canton)
         xml_file_path = tmp_file.name
-    
+
     try:
         tax_statement = importer.import_files([xml_file_path])
         assert tax_statement is not None
@@ -1541,13 +1643,13 @@ def test_ibkr_import_account_dates_set_on_bank_accounts(sample_ibkr_settings):
         # Verify bank accounts have the opening date set
         assert tax_statement.listOfBankAccounts is not None
         for ba in tax_statement.listOfBankAccounts.bankAccount:
-            assert ba.openingDate == date(2023, 5, 29), (
-                f"Expected openingDate 2023-05-29 on account {ba.bankAccountNumber}, got {ba.openingDate}"
-            )
+            assert ba.openingDate == date(
+                2023, 5, 29
+            ), f"Expected openingDate 2023-05-29 on account {ba.bankAccountNumber}, got {ba.openingDate}"
             # dateClosed was empty, so should be None
-            assert ba.closingDate is None, (
-                f"Expected closingDate None on account {ba.bankAccountNumber}, got {ba.closingDate}"
-            )
+            assert (
+                ba.closingDate is None
+            ), f"Expected closingDate None on account {ba.bankAccountNumber}, got {ba.closingDate}"
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
@@ -1654,11 +1756,19 @@ def test_ibkr_import_account_dates_scoped_to_own_statement(sample_ibkr_settings)
         assert len(tax_statement.listOfBankAccounts.bankAccount) == 2
 
         acct1_ba = next(
-            (ba for ba in tax_statement.listOfBankAccounts.bankAccount if ba.bankAccountCurrency == "USD"),
+            (
+                ba
+                for ba in tax_statement.listOfBankAccounts.bankAccount
+                if ba.bankAccountCurrency == "USD"
+            ),
             None,
         )
         acct2_ba = next(
-            (ba for ba in tax_statement.listOfBankAccounts.bankAccount if ba.bankAccountCurrency == "EUR"),
+            (
+                ba
+                for ba in tax_statement.listOfBankAccounts.bankAccount
+                if ba.bankAccountCurrency == "EUR"
+            ),
             None,
         )
         assert acct1_ba is not None
@@ -1669,9 +1779,9 @@ def test_ibkr_import_account_dates_scoped_to_own_statement(sample_ibkr_settings)
         assert acct1_ba.closingDate is None
 
         # U7777777 has no dates -> should NOT inherit U1234567's dates
-        assert acct2_ba.openingDate is None, (
-            f"U7777777 bank account should have openingDate=None but got {acct2_ba.openingDate}"
-        )
+        assert (
+            acct2_ba.openingDate is None
+        ), f"U7777777 bank account should have openingDate=None but got {acct2_ba.openingDate}"
         assert acct2_ba.closingDate is None
     finally:
         if os.path.exists(xml_file_path):
@@ -1722,7 +1832,7 @@ def test_ibkr_import_canton_extraction_no_account_info(sample_ibkr_settings):
     """Test that missing AccountInformation doesn't cause errors."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
-    
+
     xml_without_account_info = """
 <FlexQueryResponse queryName="TestQuery" type="AF">
   <FlexStatements count="1">
@@ -1736,15 +1846,15 @@ def test_ibkr_import_canton_extraction_no_account_info(sample_ibkr_settings):
   </FlexStatements>
 </FlexQueryResponse>
 """
-    
+
     importer = IbkrImporter(
         period_from=period_from, period_to=period_to, account_settings_list=sample_ibkr_settings
     )
-    
+
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
         tmp_file.write(xml_without_account_info)
         xml_file_path = tmp_file.name
-    
+
     try:
         tax_statement = importer.import_files([xml_file_path])
         assert tax_statement is not None
@@ -1844,6 +1954,7 @@ _XML_WITH_UNKNOWN_ELEMENT = """
 def _enable_unknown_attribute_tolerance():
     """Temporarily enable ibflex unknown-attribute tolerance for a single test."""
     import ibflex
+
     ibflex.enable_unknown_attribute_tolerance()
     yield
     ibflex.disable_unknown_attribute_tolerance()
@@ -1983,7 +2094,9 @@ def test_withholding_tax_cash_transactions_are_mapped_to_security_tax_fields(sam
         asml = next(security for security in securities if security.isin == "NL0010273215")
 
         assert len(ireen.payment) == 1
-        assert ireen.payment[0].name == "IREN(CH0325094297) CASH DIVIDEND CHF 2.60 PER SHARE - CH TAX"
+        assert (
+            ireen.payment[0].name == "IREN(CH0325094297) CASH DIVIDEND CHF 2.60 PER SHARE - CH TAX"
+        )
         assert ireen.payment[0].broker_label_original == "Withholding Tax"
         assert ireen.payment[0].amount == Decimal("-1234.56")
         assert ireen.payment[0].withHoldingTaxClaim == Decimal("1234.56")
@@ -1991,7 +2104,9 @@ def test_withholding_tax_cash_transactions_are_mapped_to_security_tax_fields(sam
         assert ireen.payment[0].nonRecoverableTaxAmountOriginal is None
 
         assert len(asml.payment) == 1
-        assert asml.payment[0].name == "ASML(NL0010273215) CASH DIVIDEND EUR 1.52 PER SHARE - NL TAX"
+        assert (
+            asml.payment[0].name == "ASML(NL0010273215) CASH DIVIDEND EUR 1.52 PER SHARE - NL TAX"
+        )
         assert asml.payment[0].broker_label_original == "Withholding Tax"
         assert asml.payment[0].amount == Decimal("-1.13")
         assert asml.payment[0].nonRecoverableTax is None
@@ -1999,6 +2114,7 @@ def test_withholding_tax_cash_transactions_are_mapped_to_security_tax_fields(sam
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
+
 
 # Anonymized from real IBKR Flex Query export (Yield Enhancement Income program).
 # Original lines (conid/assetCategory/symbol/isin all empty):
@@ -2032,10 +2148,11 @@ SAMPLE_IBKR_FLEX_XML_WHTAX_NO_SECURITY = """
 </FlexQueryResponse>
 """
 
+
 def test_withholding_tax_without_security_creates_bank_payment(sample_ibkr_settings):
     """Withholding tax not linked to a security (e.g. yield enhancement) should
     fall through to create a BankAccountPayment instead of raising ValueError."""
-  
+
     period_from = date(2025, 1, 1)
     period_to = date(2025, 12, 31)
 
@@ -2044,7 +2161,7 @@ def test_withholding_tax_without_security_creates_bank_payment(sample_ibkr_setti
         period_to=period_to,
         account_settings_list=sample_ibkr_settings,
     )
-    
+
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
         tmp_file.write(SAMPLE_IBKR_FLEX_XML_WHTAX_NO_SECURITY)
         xml_file_path = tmp_file.name
@@ -2127,6 +2244,7 @@ def test_trade_unit_price_set_when_not_zero(sample_ibkr_settings):
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
 
+
 def test_trade_unit_price_none_when_zero(sample_ibkr_settings):
     """Test that unitPrice is None when trade_price == Decimal(0)."""
     period_from = date(2025, 1, 1)
@@ -2176,8 +2294,6 @@ def test_trade_unit_price_none_when_zero(sample_ibkr_settings):
             os.remove(xml_file_path)
 
 
-        
-        
 def test_trade_unit_price_various_nonzero_and_zero_prices(sample_ibkr_settings):
     """Test that unitPrice is correctly set for various trade prices including zero."""
     period_from = date(2025, 1, 1)
@@ -2288,10 +2404,11 @@ def test_broker_interest_paid_debit_creates_bank_payment(caplog):
         importer = IbkrImporter(
             period_from=date(2025, 1, 1),
             period_to=date(2025, 12, 31),
-            account_settings_list=settings
+            account_settings_list=settings,
         )
 
         import logging
+
         caplog.set_level(logging.WARNING)
 
         tax_statement = importer.import_files([xml_file_path])
@@ -2305,8 +2422,7 @@ def test_broker_interest_paid_debit_creates_bank_payment(caplog):
         assert usd_account is not None, "USD bank account should exist"
 
         usd_debit_payment = next(
-            (p for p in usd_account.payment if "USD DEBIT INT FOR OCT-2025" in p.name),
-            None
+            (p for p in usd_account.payment if "USD DEBIT INT FOR OCT-2025" in p.name), None
         )
         assert usd_debit_payment is not None, "USD DEBIT INT FOR should create a bank payment"
         assert usd_debit_payment.amount == Decimal("-2.01")
@@ -2316,8 +2432,7 @@ def test_broker_interest_paid_debit_creates_bank_payment(caplog):
         assert eur_account is not None, "EUR bank account should exist"
 
         eur_debit_payment = next(
-            (p for p in eur_account.payment if "EUR DEBIT INT FOR SEP-2025" in p.name),
-            None
+            (p for p in eur_account.payment if "EUR DEBIT INT FOR SEP-2025" in p.name), None
         )
         assert eur_debit_payment is not None, "EUR DEBIT INT FOR should create a bank payment"
         assert eur_debit_payment.amount == Decimal("-1.50")
@@ -2326,15 +2441,14 @@ def test_broker_interest_paid_debit_creates_bank_payment(caplog):
         chf_account = next((ba for ba in bank_accounts if ba.bankAccountCurrency == "CHF"), None)
         assert chf_account is not None, "CHF bank account should exist"
 
-        chf_payment = next(
-            (p for p in chf_account.payment if "CHF CREDIT INT FOR" in p.name),
-            None
-        )
+        chf_payment = next((p for p in chf_account.payment if "CHF CREDIT INT FOR" in p.name), None)
         assert chf_payment is None, "CHF CREDIT INT FOR should NOT create a bank payment"
 
         # Check that a warning was logged for the CHF transaction
-        assert any("CHF CREDIT INT FOR AUG-2025" in record.message and "is not handled" in record.message
-                   for record in caplog.records), "Warning should be logged for CHF CREDIT INT FOR"
+        assert any(
+            "CHF CREDIT INT FOR AUG-2025" in record.message and "is not handled" in record.message
+            for record in caplog.records
+        ), "Warning should be logged for CHF CREDIT INT FOR"
 
     finally:
         if os.path.exists(xml_file_path):
@@ -2378,6 +2492,588 @@ def test_cancelled_out_transfer_is_allowed_and_labelled(sample_ibkr_settings):
         non_cancelled_mutations = [m for m in mutations if "(Cancelled)" not in (m.name or "")]
         assert len(non_cancelled_mutations) == 2
         assert all(m.quantity == Decimal("-58") for m in non_cancelled_mutations)
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+# Short position: AAPL was sold short (sell first, buy back later).
+# At year-end the open position is negative (-5 shares).
+SAMPLE_IBKR_FLEX_XML_SHORT_POSITION = """
+<FlexQueryResponse queryName="ShortPositionQuery" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <Trades>
+        <Trade transactionID="9001" accountId="U1234567" assetCategory="STK" symbol="AAPL" description="APPLE INC" conid="265598" isin="US0378331005" issuerCountryCode="IE" currency="USD" quantity="-5" tradeDate="2025-06-10" settleDateTarget="2025-06-12" tradePrice="200.00" tradeMoney="-1000.00" buySell="SELL" ibCommission="-0.50" ibCommissionCurrency="USD" netCash="999.50" />
+      </Trades>
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="AAPL" description="APPLE INC" conid="265598" isin="US0378331005" issuerCountryCode="IE" currency="USD" position="-5" markPrice="210.00" positionValue="-1050.00" reportDate="2025-12-31" side="Short" levelOfDetail="SUMMARY" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="999.50" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_short_stock_position_propagates_negative_balance(sample_ibkr_settings):
+    """
+    A short stock position (negative OpenPosition) is propagated as-is.
+    The IBKR importer is unopinionated: it surfaces whatever the Flex
+    report contains. Sanity-checking now lives in
+    :class:`CleanupCalculator` which logs a warning rather than raising.
+    """
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_SHORT_POSITION)
+        xml_file_path = tmp_file.name
+
+    try:
+        statement = importer.import_files([xml_file_path])
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+    assert statement.listOfSecurities is not None
+    securities = [sec for depot in statement.listOfSecurities.depot for sec in depot.security]
+    aapl = next(sec for sec in securities if sec.isin == "US0378331005")
+    closing_balances = [
+        s.quantity for s in aapl.stock if not s.mutation and s.referenceDate == date(2026, 1, 1)
+    ]
+    assert closing_balances == [Decimal("-5")]
+
+
+# OPT/C call-spread: both legs expire/close intra-year (2025-01-22, expiry 2025-01-24).
+# BE 24JAN25 26 C (conid 746386368): two BUY executions (same orderId → aggregated to +2).
+#   No OpenPosition → closing=0.  tentative_opening = 0 - 2 = -2 → capped at 0 with warning.
+# BE 24JAN25 29 C (conid 746386727): two SELL executions (same orderId → aggregated to -2).
+#   No OpenPosition → closing=0.  tentative_opening = 0 - (-2) = +2 → clean.
+SAMPLE_IBKR_FLEX_XML_OPT_C_SPREAD = """
+<FlexQueryResponse queryName="OptCSpreadQuery" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <Trades>
+        <Trade accountId="U1234567" currency="USD" assetCategory="OPT" subCategory="C" symbol="BE    250124C00026000" description="BE 24JAN25 26 C" conid="746386368" securityID="" isin="" issuerCountryCode="" tradeID="7167389262" multiplier="100" strike="26" expiry="20250124" putCall="C" tradeDate="20250122" settleDateTarget="20250123" quantity="1" tradePrice="0.7" tradeMoney="70" buySell="BUY" ibCommission="-0.30525" ibCommissionCurrency="USD" netCash="-70.30525" ibOrderID="3758992887" transactionID="31001044544" levelOfDetail="EXECUTION" />
+        <Trade accountId="U1234567" currency="USD" assetCategory="OPT" subCategory="C" symbol="BE    250124C00026000" description="BE 24JAN25 26 C" conid="746386368" securityID="" isin="" issuerCountryCode="" tradeID="7167390223" multiplier="100" strike="26" expiry="20250124" putCall="C" tradeDate="20250122" settleDateTarget="20250123" quantity="1" tradePrice="0.7" tradeMoney="70" buySell="BUY" ibCommission="-0.35525" ibCommissionCurrency="USD" netCash="-70.35525" ibOrderID="3758992887" transactionID="31001045134" levelOfDetail="EXECUTION" />
+        <Trade accountId="U1234567" currency="USD" assetCategory="OPT" subCategory="C" symbol="BE    250124C00029000" description="BE 24JAN25 29 C" conid="746386727" securityID="" isin="" issuerCountryCode="" tradeID="7167565511" multiplier="100" strike="29" expiry="20250124" putCall="C" tradeDate="20250122" settleDateTarget="20250123" quantity="-1" tradePrice="0.06" tradeMoney="-6" buySell="SELL" ibCommission="-0.3082068" ibCommissionCurrency="USD" netCash="5.6917932" ibOrderID="3759103819" transactionID="31001303208" levelOfDetail="EXECUTION" />
+        <Trade accountId="U1234567" currency="USD" assetCategory="OPT" subCategory="C" symbol="BE    250124C00029000" description="BE 24JAN25 29 C" conid="746386727" securityID="" isin="" issuerCountryCode="" tradeID="7167567743" multiplier="100" strike="29" expiry="20250124" putCall="C" tradeDate="20250122" settleDateTarget="20250123" quantity="-1" tradePrice="0.06" tradeMoney="-6" buySell="SELL" ibCommission="-0.0582068" ibCommissionCurrency="USD" netCash="5.9417932" ibOrderID="3759103819" transactionID="31001303708" levelOfDetail="EXECUTION" />
+      </Trades>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="0" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+# OPT/P still open at year-end: bought 2025-02-27, expires 2026-01-16.
+# CBOE 16JAN26 150 P (conid 666235415): BUY +1 → OpenPosition +1 at 2025-12-31.
+# opening=0, mutation=+1, closing=+1 → no negative balance.
+SAMPLE_IBKR_FLEX_XML_OPT_P_OPEN = """
+<FlexQueryResponse queryName="OptPOpenQuery" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <Trades>
+        <Trade accountId="U1234567" currency="USD" assetCategory="OPT" subCategory="P" symbol="CBOE  260116P00150000" description="CBOE 16JAN26 150 P" conid="666235415" securityID="" isin="" issuerCountryCode="" tradeID="7327996184" multiplier="100" strike="150" expiry="20260116" putCall="P" tradeDate="20250227" settleDateTarget="20250228" quantity="1" tradePrice="2.2" tradeMoney="220" buySell="BUY" ibCommission="-1.05525" ibCommissionCurrency="USD" netCash="-221.05525" ibOrderID="3856460807" transactionID="31600220491" levelOfDetail="EXECUTION" />
+      </Trades>
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="OPT" subCategory="P" symbol="CBOE  260116P00150000" description="CBOE 16JAN26 150 P" conid="666235415" isin="" issuerCountryCode="" currency="USD" position="1" markPrice="2.1781" positionValue="217.81" multiplier="100" reportDate="2025-12-31" levelOfDetail="SUMMARY" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="0" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_opt_c_spread_closes_intra_year(sample_ibkr_settings):
+    """
+    OPT/C call spread where both legs open and close within the year.
+
+    BE 24JAN25 26 C (long leg): two BUY executions on the same orderId are
+    aggregated into a single +2 mutation.  No OpenPosition → closing balance 0.
+    The tentative opening (0 - 2 = -2) is capped to 0 silently; no error is
+    raised because asset category is OPT/C.  No opening balance entry is
+    written (opening == 0).
+
+    BE 24JAN25 29 C (short leg): two SELL executions on the same orderId are
+    aggregated into -2.  No OpenPosition → closing balance 0; tentative
+    opening = 0 - (-2) = +2.  Opening balance entry written at period start.
+    """
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+    end_plus_one = period_to + timedelta(days=1)
+
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_OPT_C_SPREAD)
+        xml_file_path = tmp_file.name
+
+    try:
+        tax_statement = importer.import_files([xml_file_path])
+
+        assert tax_statement is not None
+        depot = tax_statement.listOfSecurities.depot[0]
+        security_names = {s.securityName for s in depot.security}
+        assert "BE 24JAN25 26 C (BE    250124C00026000)" in security_names
+        assert "BE 24JAN25 29 C (BE    250124C00029000)" in security_names
+
+        # Long leg: two BUY executions with same orderId → aggregated to +2
+        long_leg = next(s for s in depot.security if "26 C" in s.securityName)
+        assert long_leg.securityCategory == "OPTION"
+        mutations = [s for s in long_leg.stock if s.mutation]
+        assert len(mutations) == 1
+        assert mutations[0].quantity == Decimal("2")
+        assert mutations[0].referenceDate == date(2025, 1, 22)
+
+        # Closing balance of 0 written at end+1
+        closing_long = next(
+            s for s in long_leg.stock if not s.mutation and s.referenceDate == end_plus_one
+        )
+        assert closing_long.quantity == Decimal("0")
+
+        # Short leg: two SELL executions with same orderId → aggregated to -2
+        short_leg = next(s for s in depot.security if "29 C" in s.securityName)
+        assert short_leg.securityCategory == "OPTION"
+        mutations_short = [s for s in short_leg.stock if s.mutation]
+        assert len(mutations_short) == 1
+        assert mutations_short[0].quantity == Decimal("-2")
+        assert mutations_short[0].referenceDate == date(2025, 1, 22)
+        # Opening balance inferred as +2 → written at period start
+        opening = next(
+            s for s in short_leg.stock if not s.mutation and s.referenceDate == period_from
+        )
+        assert opening.quantity == Decimal("2")
+        # Closing balance of 0 written at end+1
+        closing_short = next(
+            s for s in short_leg.stock if not s.mutation and s.referenceDate == end_plus_one
+        )
+        assert closing_short.quantity == Decimal("0")
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+def test_opt_p_open_at_year_end(sample_ibkr_settings):
+    """
+    OPT/P put option bought intra-year and still open at year-end.
+
+    CBOE 16JAN26 150 P: BUY +1 on 2025-02-27, expires 2026-01-16.
+    OpenPosition reports position=+1 at 2025-12-31.
+    Expected: opening balance 0, one +1 mutation, closing balance +1.
+    No negative balance at any point.
+    """
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_OPT_P_OPEN)
+        xml_file_path = tmp_file.name
+
+    try:
+        tax_statement = importer.import_files([xml_file_path])
+
+        assert tax_statement is not None
+        depot = tax_statement.listOfSecurities.depot[0]
+        assert len(depot.security) == 1
+
+        put_opt = depot.security[0]
+        assert "CBOE 16JAN26 150 P" in put_opt.securityName
+        assert put_opt.securityCategory == "OPTION"
+        assert put_opt.currency == "USD"
+
+        mutations = [s for s in put_opt.stock if s.mutation]
+        assert len(mutations) == 1
+        assert mutations[0].quantity == Decimal("1")
+        assert mutations[0].referenceDate == date(2025, 2, 27)
+
+        end_plus_one = period_to + timedelta(days=1)
+        closing = next(
+            s for s in put_opt.stock if not s.mutation and s.referenceDate == end_plus_one
+        )
+        assert closing.quantity == Decimal("1")
+
+        # No opening balance entry needed (position was 0 at period start)
+        assert not any(not s.mutation and s.referenceDate == period_from for s in put_opt.stock)
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+# ADR Fee transaction - should be ignored even though it has a security conid
+SAMPLE_IBKR_FLEX_XML_ADR_FEE = """
+<FlexQueryResponse queryName="ADRFeeQuery" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" subCategory="ADR" symbol="XNET" description="XNET INC" conid="157874416" isin="US98419E1082" currency="USD" position="5714" markPrice="2.00" positionValue="11428.00" reportDate="2025-12-31" />
+      </OpenPositions>
+      <CashTransactions>
+        <CashTransaction currency="USD" symbol="XNET" description="XNET(98419E108) ADR Fee USD 0.02 PER SHARE - FEE" conid="157874416" isin="US98419E1082" dateTime="20250909;202000" amount="-114.36" type="Other Fees" accountId="U1234567" acctAlias="" model="Independent" fxRateToBase="1" assetCategory="STK" subCategory="ADR" securityID="US98419E1082" securityIDType="ISIN" cusip="98419E108" figi="BBG001QWYTJ7" listingExchange="NASDAQ" underlyingConid="" underlyingSymbol="XNET" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="CN" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="" settleDate="20250909" availableForTradingDate="" tradeID="" code="" transactionID="34926756516" reportDate="20250912" exDate="" clientReference="" actionID="" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0" />
+      </CashTransactions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="0" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_security_linked_adr_fee_is_ignored(sample_ibkr_settings):
+    """
+    ADR fees are security-linked fees (have a conid) but should be ignored
+    like other fees. This test verifies that fees associated with securities
+    do not create SecurityPayment objects that would cause reconciliation mismatches.
+
+    See issue: "Payment reconciliation: IBKR ADR Fee shown as mismatch"
+    """
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_ADR_FEE)
+        xml_file_path = tmp_file.name
+
+    try:
+        tax_statement = importer.import_files([xml_file_path])
+
+        assert tax_statement is not None
+        depot = tax_statement.listOfSecurities.depot[0]
+        assert len(depot.security) == 1
+
+        # Security should exist due to OpenPosition
+        xnet_sec = depot.security[0]
+        assert "XNET" in xnet_sec.securityName
+        assert xnet_sec.isin == "US98419E1082"
+
+        # ADR fee should NOT create a SecurityPayment
+        assert len(xnet_sec.payment) == 0, "ADR fee should not create a SecurityPayment"
+
+        # Verify closing balance exists from OpenPosition
+        end_plus_one = period_to + timedelta(days=1)
+        closing = next(
+            (s for s in xnet_sec.stock if not s.mutation and s.referenceDate == end_plus_one), None
+        )
+        assert closing is not None
+        assert closing.quantity == Decimal("5714")
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+SAMPLE_IBKR_FLEX_XML_PAYMENT_IN_LIEU = """
+<FlexQueryResponse queryName="TestQuery" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="AIRC" description="APARTMENT INCOME REIT CORP" conid="456398961" isin="US03938L2034" issuerCountryCode="US" currency="USD" position="100" markPrice="30.00" positionValue="3000.00" reportDate="2025-12-31" />
+      </OpenPositions>
+      <CashTransactions>
+        <CashTransaction accountId="U1234567" type="Payment In Lieu Of Dividends" currency="USD" amount="35.00" description="AIRC(US03938L2034) Payment in Lieu of Dividend" conid="456398961" symbol="AIRC" isin="US03938L2034" dateTime="20250606;202000" assetCategory="STK" levelOfDetail="DETAIL" />
+        <CashTransaction accountId="U1234567" type="Dividends" currency="USD" amount="65.00" description="AIRC(US03938L2034) Cash Dividend USD 0.45 per Share (Ordinary Dividend)" conid="456398961" symbol="AIRC" isin="US03938L2034" dateTime="20250904;202000" assetCategory="STK" levelOfDetail="DETAIL" />
+      </CashTransactions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="100" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_payment_in_lieu_of_dividends_is_marked_as_securities_lending(sample_ibkr_settings):
+    """
+    'Payment In Lieu Of Dividends' cash transactions must have securitiesLending=True
+    on the resulting SecurityPayment so that DA-1 withholding is not wrongly claimed
+    for payments where no withholding was actually deducted by the broker.
+
+    See issue: "IBKR: Position with Payment In Lieu Of Dividends payments deduction
+    wrongly classified as DA-1"
+    """
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_PAYMENT_IN_LIEU)
+        xml_file_path = tmp_file.name
+
+    try:
+        tax_statement = importer.import_files([xml_file_path])
+
+        assert tax_statement is not None
+        depot = tax_statement.listOfSecurities.depot[0]
+        assert len(depot.security) == 1
+
+        airc = depot.security[0]
+        assert airc.isin == "US03938L2034"
+        assert len(airc.payment) == 2
+
+        # Find each payment by description keyword
+        pil_payment = next(p for p in airc.payment if "Lieu" in p.name)
+        div_payment = next(p for p in airc.payment if "Dividend" in p.name and "Lieu" not in p.name)
+
+        # Payment In Lieu must be flagged as securitiesLending
+        assert pil_payment.securitiesLending is True
+
+        # Ordinary dividend must NOT be flagged as securitiesLending
+        assert div_payment.securitiesLending is None
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+# --------------------------------------------------------------------------- #
+#  Issue #308: Corrections flex – withholding-tax reversals for bond ETFs
+# --------------------------------------------------------------------------- #
+
+# Main flex covering tax year 2025 – contains the original -61.83 USD
+# withholding on a BND dividend.
+SAMPLE_IBKR_FLEX_XML_BND_MAIN = """
+<FlexQueryResponse queryName="BNDMain" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U12345678" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U12345678" assetCategory="STK" subCategory="ETF" symbol="BND" description="VANGUARD TOTAL BOND MARKET" conid="43645828" securityID="US9219378356" securityIDType="ISIN" cusip="921937835" isin="US9219378356" issuerCountryCode="US" currency="USD" position="254" markPrice="70.00" positionValue="17780.00" reportDate="2025-12-31" />
+      </OpenPositions>
+      <CashTransactions>
+        <CashTransaction accountId="U12345678" acctAlias="" model="" currency="USD" fxRateToBase="0.81028" assetCategory="STK" subCategory="ETF" symbol="BND" description="BND(US9219378356) CASH DIVIDEND USD 0.243631 PER SHARE - US TAX" conid="43645828" securityID="US9219378356" securityIDType="ISIN" cusip="921937835" isin="US9219378356" figi="BBG000BZZS63" listingExchange="NASDAQ" underlyingConid="" underlyingSymbol="BND" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="US" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="" dateTime="20251105;202000" settleDate="20251105" availableForTradingDate="" amount="-61.83" type="Withholding Tax" tradeID="" code="" transactionID="36059967158" reportDate="20251105" exDate="" clientReference="" actionID="148268670" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0"/>
+        <CashTransaction accountId="U12345678" acctAlias="" model="" currency="USD" fxRateToBase="0.81028" assetCategory="STK" subCategory="ETF" symbol="BND" description="BND(US9219378356) CASH DIVIDEND USD 0.243631 PER SHARE (Ordinary Dividend)" conid="43645828" securityID="US9219378356" securityIDType="ISIN" cusip="921937835" isin="US9219378356" figi="BBG000BZZS63" listingExchange="NASDAQ" underlyingConid="" underlyingSymbol="BND" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="US" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="" dateTime="20251105;202000" settleDate="20251105" availableForTradingDate="" amount="61.88" type="Dividends" tradeID="" code="" transactionID="36059967157" reportDate="20251105" exDate="" clientReference="" actionID="148268670" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0"/>
+      </CashTransactions>
+      <CashReport>
+        <CashReportCurrency accountId="U12345678" currency="USD" startingCash="0" endingCash="100.00" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+# Corrections flex covering Jan–Mar 2026 – contains reversal (+61.83) and
+# reduced re-withholding (-4.70), both with settleDate=2025-11-05.
+SAMPLE_IBKR_FLEX_XML_BND_CORRECTIONS = """
+<FlexQueryResponse queryName="BNDCorrections" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U12345678" fromDate="2026-01-01" toDate="2026-03-31" period="Custom" whenGenerated="2026-04-01T10:00:00">
+      <CashTransactions>
+        <CashTransaction accountId="U12345678" acctAlias="" model="" currency="USD" fxRateToBase="0.77527" assetCategory="STK" subCategory="ETF" symbol="BND" description="BND(US9219378356) CASH DIVIDEND USD 0.243631 PER SHARE - US TAX" conid="43645828" securityID="US9219378356" securityIDType="ISIN" cusip="921937835" isin="US9219378356" figi="BBG000BZZS63" listingExchange="NASDAQ" underlyingConid="" underlyingSymbol="BND" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="US" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="" dateTime="20251105;202000" settleDate="20251105" availableForTradingDate="" amount="61.83" type="Withholding Tax" tradeID="" code="" transactionID="37763983470" reportDate="20260203" exDate="" clientReference="" actionID="148268670" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0"/>
+        <CashTransaction accountId="U12345678" acctAlias="" model="" currency="USD" fxRateToBase="0.77527" assetCategory="STK" subCategory="ETF" symbol="BND" description="BND(US9219378356) CASH DIVIDEND USD 0.243631 PER SHARE - US TAX" conid="43645828" securityID="US9219378356" securityIDType="ISIN" cusip="921937835" isin="US9219378356" figi="BBG000BZZS63" listingExchange="NASDAQ" underlyingConid="" underlyingSymbol="BND" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="US" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="" dateTime="20251105;202000" settleDate="20251105" availableForTradingDate="" amount="-4.70" type="Withholding Tax" tradeID="" code="" transactionID="37763983487" reportDate="20260203" exDate="" clientReference="" actionID="148268670" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0"/>
+        <CashTransaction accountId="U12345678" acctAlias="" model="" currency="USD" fxRateToBase="0.77527" assetCategory="STK" subCategory="ETF" symbol="BND" description="BND(US9219378356) UNRELATED 2026 DIVIDEND" conid="43645828" securityID="US9219378356" securityIDType="ISIN" cusip="921937835" isin="US9219378356" figi="BBG000BZZS63" listingExchange="NASDAQ" underlyingConid="" underlyingSymbol="BND" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="US" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="" dateTime="20260205;202000" settleDate="20260205" availableForTradingDate="" amount="-10.00" type="Withholding Tax" tradeID="" code="" transactionID="99999999999" reportDate="20260205" exDate="" clientReference="" actionID="999999999" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0"/>
+      </CashTransactions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_ibkr_corrections_flex_imports_withholding_reversals(sample_ibkr_settings):
+    """Corrections flex withholding-tax entries with settleDate in the tax year
+    are imported and netted against the original deduction (issue #308)."""
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    settings = [
+        IbkrAccountSettings(
+            account_number="U12345678",
+            broker_name="Interactive Brokers",
+            account_name_alias="Test",
+            canton="ZH",
+            full_name="Test User",
+        )
+    ]
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as f_main:
+        f_main.write(SAMPLE_IBKR_FLEX_XML_BND_MAIN)
+        main_path = f_main.name
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as f_corr:
+        f_corr.write(SAMPLE_IBKR_FLEX_XML_BND_CORRECTIONS)
+        corr_path = f_corr.name
+
+    try:
+        tax_statement = importer.import_files([main_path], corrections_filenames=[corr_path])
+        assert tax_statement is not None
+        depot = tax_statement.listOfSecurities.depot[0]
+        bnd_sec = next(s for s in depot.security if "BND" in s.securityName)
+
+        # Original flex: 1 dividend + 1 withholding
+        # Corrections: 2 entries (reversal + new withholding) – the 2026
+        # dividend entry (settleDate 2026-02-05) must NOT be imported.
+        wht_payments = [
+            p
+            for p in bnd_sec.payment
+            if p.nonRecoverableTaxAmountOriginal is not None or p.withHoldingTaxClaim is not None
+        ]
+
+        # Net withholding should sum to 4.70 USD
+        net_wht = sum(
+            (p.nonRecoverableTaxAmountOriginal or Decimal("0"))
+            + (p.withHoldingTaxClaim or Decimal("0"))
+            for p in wht_payments
+        )
+        assert net_wht == Decimal("4.70"), f"Expected net WHT 4.70, got {net_wht}"
+
+        # The 2026-02-05 entry must not appear (settleDate outside tax year)
+        all_dates = [p.paymentDate for p in bnd_sec.payment]
+        assert date(2026, 2, 5) not in all_dates
+
+    finally:
+        os.remove(main_path)
+        os.remove(corr_path)
+
+
+def test_ibkr_corrections_flex_skips_out_of_period_transactions(sample_ibkr_settings):
+    """Corrections flex entries whose settleDate is outside the tax year
+    must be excluded."""
+    period_from = date(2025, 1, 1)
+    period_to = date(2025, 12, 31)
+
+    settings = [
+        IbkrAccountSettings(
+            account_number="U12345678",
+            broker_name="Interactive Brokers",
+            account_name_alias="Test",
+            canton="ZH",
+            full_name="Test User",
+        )
+    ]
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as f_main:
+        f_main.write(SAMPLE_IBKR_FLEX_XML_BND_MAIN)
+        main_path = f_main.name
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as f_corr:
+        f_corr.write(SAMPLE_IBKR_FLEX_XML_BND_CORRECTIONS)
+        corr_path = f_corr.name
+
+    try:
+        # Import without corrections
+        tax_without_corr = importer.import_files([main_path])
+        bnd_without = next(
+            s
+            for d in tax_without_corr.listOfSecurities.depot
+            for s in d.security
+            if "BND" in s.securityName
+        )
+        payments_without = len(bnd_without.payment)
+
+        # Import with corrections
+        importer2 = IbkrImporter(
+            period_from=period_from,
+            period_to=period_to,
+            account_settings_list=settings,
+        )
+        tax_with_corr = importer2.import_files([main_path], corrections_filenames=[corr_path])
+        bnd_with = next(
+            s
+            for d in tax_with_corr.listOfSecurities.depot
+            for s in d.security
+            if "BND" in s.securityName
+        )
+        payments_with = len(bnd_with.payment)
+
+        # Corrections should add exactly 2 payments (reversal + re-withholding)
+        # The 3rd entry in the corrections file (2026 dividend) is excluded
+        assert payments_with == payments_without + 2
+
+    finally:
+        os.remove(main_path)
+        os.remove(corr_path)
+
+
+SAMPLE_IBKR_FLEX_XML_BOND_INTEREST = """
+<FlexQueryResponse queryName="BondInterest" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2023-01-01" toDate="2023-12-31" period="Year" whenGenerated="2024-01-15T10:00:00">
+      <CashTransactions>
+        <CashTransaction accountId="U1234567" acctAlias="" model="" currency="USD" fxRateToBase="1" assetCategory="BOND" subCategory="Govt" symbol="T 3 7/8 08/15/33" description="BOND COUPON PAYMENT (T 3 7/8 08/15/33 - United States Treasury T 3 7/8 08/15/33)" conid="647589171" securityID="US91282CHT18" securityIDType="ISIN" cusip="91282CHT1" isin="US91282CHT18" figi="BBG01HQWRSG4" listingExchange="" underlyingConid="" underlyingSymbol="T" underlyingSecurityID="" underlyingListingExchange="" issuer="" issuerCountryCode="US" multiplier="1" strike="" expiry="" putCall="" principalAdjustFactor="1" dateTime="2023-02-17" settleDate="2023-02-17" availableForTradingDate="" amount="1937.5" type="Bond Interest Received" dividendType="" tradeID="" code="" transactionID="38088293515" reportDate="2023-02-18" exDate="" clientReference="" actionID="" levelOfDetail="DETAIL" serialNumber="" deliveryType="" commodityType="" fineness="0.0" weight="0.0" />
+      </CashTransactions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="1937.5" fromDate="2023-01-01" toDate="2023-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_bond_interest_import_succeeds(sample_ibkr_settings):
+    """Importing bond interest cash transactions should succeed and create a BOND security."""
+    period_from = date(2023, 1, 1)
+    period_to = date(2023, 12, 31)
+
+    importer = IbkrImporter(
+        period_from=period_from,
+        period_to=period_to,
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_BOND_INTEREST)
+        xml_file_path = tmp_file.name
+
+    try:
+        statement = importer.import_files([xml_file_path])
+        assert statement is not None
+
+        # Verify the security of category BOND was created
+        securities = [s for d in statement.listOfSecurities.depot for s in d.security]
+        assert len(securities) == 1
+        bond_sec = securities[0]
+        assert bond_sec.securityCategory == "BOND"
+        assert bond_sec.isin == "US91282CHT18"
+        assert (
+            bond_sec.securityName == "BOND COUPON PAYMENT (T 3 7/8 ...08/15/33) (T 3 7/8 08/15/33)"
+        )
+
+        # Verify the bond interest payment was correctly created
+        assert len(bond_sec.payment) == 1
+        payment = bond_sec.payment[0]
+        assert payment.amount == Decimal("1937.5")
+        assert payment.amountCurrency == "USD"
+        assert payment.paymentDate == date(2023, 2, 17)
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)

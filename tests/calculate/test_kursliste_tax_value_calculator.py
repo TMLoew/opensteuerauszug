@@ -164,6 +164,48 @@ def test_handle_security_tax_value_from_kursliste(kursliste_manager):
     assert stv.exchangeRate == Decimal("1")
     assert stv.kursliste is True
     assert stv.balanceCurrency == "CHF"
+    assert stv.balance == Decimal("127750")
+
+
+def test_handle_security_tax_value_updates_foreign_balance(kursliste_manager):
+    """
+    Test that when a security's tax value is updated from Kursliste,
+    both the value and the balance are updated to match the CHF value
+    if the original balance was in a foreign currency.
+    """
+    provider = KurslisteExchangeRateProvider(kursliste_manager)
+    calc = KurslisteTaxValueCalculator(
+        mode=CalculationMode.OVERWRITE, exchange_rate_provider=provider
+    )
+    sec = Security(
+        country="CH",
+        securityName="Roche",
+        positionId=1,
+        currency="CHF",
+        quotationType="PIECE",
+        securityCategory="SHARE",
+        isin=ISINType("CH0012032048"),
+        taxValue=SecurityTaxValue(
+            referenceDate=date(2024, 12, 31),
+            quotationType="PIECE",
+            quantity=Decimal("500"),
+            balanceCurrency="USD",  # Intentionally using foreign currency to test behavior
+            balance=Decimal("150000"),  # Random USD balance from a broker
+        ),
+        stock=[],
+    )
+
+    calc._handle_Security(sec, "sec")
+    stv = sec.taxValue
+    calc._handle_SecurityTaxValue(stv, "sec.taxValue")
+
+    assert stv.unitPrice == Decimal("255.5")
+    assert stv.value == Decimal("127750")
+    assert stv.exchangeRate == Decimal("1")
+    assert stv.kursliste is True
+    assert stv.balanceCurrency == "CHF"
+    # Balance should equal value because Kursliste forced currency to CHF.
+    assert stv.balance == Decimal("127750")
 
 
 def test_handle_security_tax_value_sets_undefined_when_not_in_kursliste(kursliste_manager):
@@ -250,7 +292,7 @@ def test_compute_payments_from_kursliste_missing_ex_date(kursliste_manager):
     assert payment.amountPerUnit == Decimal("1.5312762338")
     assert payment.amount == Decimal("153.12762338")
     assert payment.exchangeRate == Decimal("0.90405")
-    # Reality vs spec: All three fields should be set when at least one is set
+    # FUND_ACCUMULATION payment type has taxable revenue but no withholding claim
     assert payment.grossRevenueA == Decimal("0")
     assert payment.grossRevenueB == Decimal("138.400")
     assert payment.withHoldingTaxClaim == Decimal("0")
@@ -434,7 +476,8 @@ def test_compute_payments_stock_split_requires_mutation():
 
     result = calc.calculate(statement)
     split_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
     ]
     assert len(split_warnings) == 1
@@ -701,7 +744,8 @@ def test_cross_isin_stock_split_error_when_removal_mutation_missing():
 
     result = calc.calculate(statement)
     split_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
     ]
     assert len(split_warnings) == 1
@@ -854,6 +898,143 @@ def test_cross_isin_stock_split_resolves_new_security_by_kursliste_isin_when_val
     assert calc.errors == []
 
 
+def test_cross_isin_stock_split_resolves_new_security_without_old_tax_value():
+    """Cross-ISIN split validation should still resolve the new security via
+    Kursliste when the old security has no taxValue (fully replaced intra-year)."""
+    split_date = date(2025, 5, 16)
+    old_isin = "US05968L1026"
+    new_isin = "US40090E1064"
+    new_valor = 145059053
+
+    payment = PaymentShare(
+        id=1,
+        paymentDate=split_date,
+        currency="COP",
+        paymentValue=Decimal("0"),
+        paymentValueCHF=Decimal("0"),
+        paymentType=PaymentTypeESTV.OTHER_BENEFIT,
+        taxEvent=True,
+        exDate=split_date,
+        legend=[
+            Legend(
+                id=1,
+                effectiveDate=split_date,
+                exchangeRatioPresent=Decimal("1"),
+                exchangeRatioNew=Decimal("1"),
+                valorNumberNew=new_valor,
+            )
+        ],
+    )
+
+    old_share = Share(
+        id=1,
+        isin=old_isin,
+        valorNumber=882239,
+        securityGroup=SecurityGroupESTV.SHARE,
+        securityName="SADR",
+        institutionId=54824,
+        institutionName="Bancolombia SA",
+        country="CO",
+        currency="COP",
+        nominalValue=Decimal("500"),
+        payment=[payment],
+    )
+    new_share = Share(
+        id=2,
+        isin=new_isin,
+        valorNumber=new_valor,
+        securityGroup=SecurityGroupESTV.SHARE,
+        securityName="ADR",
+        institutionId=941697,
+        institutionName="Grupo Cibest S.A.",
+        country="CO",
+        currency="COP",
+        nominalValue=Decimal("500"),
+    )
+    kursliste = Kursliste(
+        version="2.2.0.0",
+        creationDate=datetime(2025, 1, 1),
+        year=2025,
+        shares=[old_share, new_share],
+    )
+    kursliste_manager = KurslisteManager()
+    kursliste_manager.kurslisten[2025] = KurslisteAccessor([kursliste], 2025)
+
+    provider = KurslisteExchangeRateProvider(kursliste_manager)
+    calc = KurslisteTaxValueCalculator(
+        mode=CalculationMode.OVERWRITE, exchange_rate_provider=provider
+    )
+
+    old_security = Security(
+        country="CO",
+        securityName="BANCOLOMBIA S.A.-SPONS ADR",
+        positionId=1,
+        currency="USD",
+        quotationType="PIECE",
+        securityCategory="SHARE",
+        isin=ISINType(old_isin),
+        stock=[
+            SecurityStock(
+                referenceDate=date(2025, 1, 1),
+                mutation=False,
+                quotationType="PIECE",
+                quantity=Decimal("700"),
+                balanceCurrency="USD",
+            ),
+            SecurityStock(
+                referenceDate=split_date,
+                mutation=True,
+                quotationType="PIECE",
+                quantity=Decimal("-700"),
+                balanceCurrency="USD",
+            ),
+        ],
+    )
+
+    new_security = Security(
+        country="CO",
+        securityName="GRUPO CIBEST SA-ADR",
+        positionId=2,
+        currency="USD",
+        quotationType="PIECE",
+        securityCategory="SHARE",
+        isin=ISINType(new_isin),
+        stock=[
+            SecurityStock(
+                referenceDate=split_date,
+                mutation=True,
+                quotationType="PIECE",
+                quantity=Decimal("700"),
+                balanceCurrency="USD",
+            ),
+        ],
+    )
+
+    statement = TaxStatement(
+        minorVersion=2,
+        taxPeriod=2025,
+        periodFrom=date(2025, 1, 1),
+        periodTo=date(2025, 12, 31),
+        listOfSecurities=ListOfSecurities(
+            depot=[
+                Depot(
+                    depotNumber=DepotNumber("U1234567"),
+                    security=[old_security, new_security],
+                )
+            ]
+        ),
+    )
+
+    result = calc.calculate(statement)
+    split_warnings = [
+        w
+        for w in result.critical_warnings
+        if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
+    ]
+    assert split_warnings == []
+    assert calc.errors == []
+
+
 def test_cross_isin_stock_split_error_when_new_security_missing():
     """When a cross-ISIN split references a valorNumberNew that does not
     correspond to any security in the statement, the validator should raise."""
@@ -957,7 +1138,8 @@ def test_cross_isin_stock_split_error_when_new_security_missing():
 
     result = calc.calculate(statement)
     split_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
     ]
     assert len(split_warnings) == 1
@@ -1095,7 +1277,8 @@ def test_cross_isin_stock_split_error_when_new_security_addition_wrong():
 
     result = calc.calculate(statement)
     split_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
     ]
     assert len(split_warnings) == 1
@@ -1225,7 +1408,8 @@ def test_cross_isin_stock_split_error_when_new_security_has_no_mutations():
 
     result = calc.calculate(statement)
     split_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
     ]
     assert len(split_warnings) == 1
@@ -1324,7 +1508,8 @@ def test_same_isin_stock_split_error_message_is_descriptive():
 
     result = calc.calculate(statement)
     split_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.STOCK_SPLIT_MISMATCH
     ]
     assert len(split_warnings) == 1
@@ -1707,6 +1892,49 @@ def test_compute_payments_skip_zero_quantity(kursliste_manager):
     calc._handle_Security(sec, "sec")
     # Should not generate any payments since quantity is zero on payment dates
     assert len(sec.payment) == 0
+
+
+def test_compute_payments_negative_quantity(kursliste_manager):
+    """
+    Test that payment value is set to 0 when the quantity of outstanding
+    securities is negative on the payment date.
+    """
+    provider = KurslisteExchangeRateProvider(kursliste_manager)
+    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+
+    # Create a security with stock that is short on the payment date
+    sec = Security(
+        country="US",
+        securityName="Vanguard Total Stock Market ETF",
+        positionId=1,
+        currency="USD",
+        quotationType="PIECE",
+        securityCategory="FUND",
+        isin=ISINType("US9229087690"),
+        stock=[
+            SecurityStock(
+                referenceDate=date(2024, 3, 21),
+                mutation=True,
+                quotationType="PIECE",
+                quantity=Decimal("-100"),
+                balanceCurrency="USD",
+            ),
+            SecurityStock(
+                referenceDate=date(2024, 3, 22),
+                mutation=True,
+                quotationType="PIECE",
+                quantity=Decimal("100"),
+                balanceCurrency="USD",
+            ),
+        ],
+    )
+
+    calc._handle_Security(sec, "sec")
+    assert len(sec.payment) == 1
+    payment = sec.payment[0]
+    assert payment.quantity == Decimal("-100")
+    assert payment.amount == Decimal("0")
+    assert payment.amountPerUnit > Decimal("0")
 
 
 def test_compute_payments_capital_gain_scenario(kursliste_manager):
@@ -2094,7 +2322,8 @@ def test_no_missing_kursliste_warning_for_rights_issue_with_no_tax_value():
     result = calc.calculate(statement)
 
     missing_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.MISSING_KURSLISTE
     ]
     assert missing_warnings == []
@@ -2171,8 +2400,173 @@ def test_missing_kursliste_warning_for_security_with_no_tax_value_but_stock_tran
     result = calc.calculate(statement)
 
     missing_warnings = [
-        w for w in result.critical_warnings
+        w
+        for w in result.critical_warnings
         if w.category == CriticalWarningCategory.MISSING_KURSLISTE
     ]
     assert len(missing_warnings) == 1
     assert missing_warnings[0].identifier == "US1234567890"
+
+
+def test_compute_payments_raises_error_for_multiple_variants_same_event(kursliste_manager):
+    """
+    Test that payments with multiple distinct variants for the same event raise a
+    NotImplementedError. The variant field signals an OR-choice between alternatives
+    (e.g. cash dividend vs. stock dividend) that we cannot resolve mechanically.
+    """
+    provider = KurslisteExchangeRateProvider(kursliste_manager)
+    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+
+    ex_date = date(2024, 5, 10)
+    # Two payments for the same event (same exDate) with different variant numbers.
+    kl_sec = Share(
+        id=1,
+        securityGroup=SecurityGroupESTV.SHARE,
+        country="CH",
+        currency="CHF",
+        institutionId=123,
+        institutionName="Test Bank",
+        payment=[
+            PaymentShare(
+                id=101,
+                paymentDate=date(2024, 5, 15),
+                exDate=ex_date,
+                currency="CHF",
+                paymentValue=Decimal("2.50"),
+                paymentValueCHF=Decimal("2.50"),
+                exchangeRate=Decimal("1.0"),
+                variant=1,  # Cash dividend option
+            ),
+            PaymentShare(
+                id=102,
+                paymentDate=date(2024, 5, 15),
+                exDate=ex_date,
+                currency="CHF",
+                paymentValue=Decimal("0"),
+                paymentValueCHF=Decimal("0"),
+                paymentType=PaymentTypeESTV.GRATIS,
+                variant=2,  # Stock dividend option
+            ),
+        ],
+    )
+
+    sec = Security(
+        country="CH",
+        securityName="Test Security",
+        positionId=1,
+        currency="CHF",
+        quotationType="PIECE",
+        securityCategory="SHARE",
+        isin=ISINType("CH0000000001"),
+        taxValue=SecurityTaxValue(
+            referenceDate=date(2024, 12, 31),
+            quotationType="PIECE",
+            quantity=Decimal("100"),
+            balanceCurrency="CHF",
+        ),
+        stock=[
+            SecurityStock(
+                referenceDate=date(2024, 1, 1),
+                mutation=False,
+                quotationType="PIECE",
+                quantity=Decimal("100"),
+                balanceCurrency="CHF",
+            )
+        ],
+    )
+
+    calc._current_kursliste_security = kl_sec
+
+    with pytest.raises(NotImplementedError, match="multiple variants"):
+        calc.computePayments(sec, "sec")
+
+
+def test_compute_payments_single_variant_does_not_raise(kursliste_manager):
+    """
+    Test that payments where every payment for an event shares the same single variant
+    value do not raise an error (they all belong to the same chosen option).
+    """
+    # computePayments flows all the way through the DA-1 lookup which calls
+    # accessor.get_da1_rate unconditionally; require the year's data to exist.
+    ensure_kursliste_year_available(
+        kursliste_manager, 2024, "test_compute_payments_single_variant_does_not_raise"
+    )
+
+    provider = KurslisteExchangeRateProvider(kursliste_manager)
+    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+
+    ex_date = date(2024, 5, 10)
+    # Two payments for the same event with the SAME variant number - this is fine (AND).
+    kl_sec = Share(
+        id=1,
+        securityGroup=SecurityGroupESTV.SHARE,
+        country="CH",
+        currency="CHF",
+        institutionId=123,
+        institutionName="Test Bank",
+        payment=[
+            PaymentShare(
+                id=101,
+                paymentDate=date(2024, 5, 15),
+                exDate=ex_date,
+                currency="CHF",
+                paymentValue=Decimal("2.50"),
+                paymentValueCHF=Decimal("2.50"),
+                exchangeRate=Decimal("1.0"),
+                variant=1,
+            ),
+        ],
+    )
+
+    sec = Security(
+        country="CH",
+        securityName="Test Security",
+        positionId=1,
+        currency="CHF",
+        quotationType="PIECE",
+        securityCategory="SHARE",
+        isin=ISINType("CH0000000001"),
+        taxValue=SecurityTaxValue(
+            referenceDate=date(2024, 12, 31),
+            quotationType="PIECE",
+            quantity=Decimal("100"),
+            balanceCurrency="CHF",
+        ),
+        stock=[
+            SecurityStock(
+                referenceDate=date(2024, 1, 1),
+                mutation=False,
+                quotationType="PIECE",
+                quantity=Decimal("100"),
+                balanceCurrency="CHF",
+            )
+        ],
+    )
+
+    calc._current_kursliste_security = kl_sec
+
+    # Should not raise - only one variant value present
+    calc.computePayments(sec, "sec")
+    assert len(sec.payment) == 1
+
+
+def test_kursliste_calculator_fails_on_bond_security(kursliste_manager):
+    """Verify that a security with securityCategory='BOND' causes a ValueError referring to issue #262."""
+    provider = KurslisteExchangeRateProvider(kursliste_manager)
+    calc = KurslisteTaxValueCalculator(mode=CalculationMode.FILL, exchange_rate_provider=provider)
+
+    security = Security(
+        country="US",
+        securityName="US Treasury Bond",
+        positionId=1,
+        currency="USD",
+        quotationType="PIECE",
+        securityCategory="BOND",
+        isin=ISINType("US91282CHT18"),
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        calc._handle_Security(security, "security")
+
+    assert "Bonds are not supported" in str(excinfo.value)
+    assert "#262" in str(excinfo.value)

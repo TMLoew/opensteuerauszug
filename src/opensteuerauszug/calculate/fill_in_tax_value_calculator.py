@@ -6,19 +6,38 @@ import logging
 from opensteuerauszug.model.ech0196 import SecurityPayment, Security, SecurityTaxValue
 from .kursliste_tax_value_calculator import KurslisteTaxValueCalculator
 from .base import CalculationMode
-from ..core.exchange_rate_provider import ExchangeRateProvider
-from ..core.flag_override_provider import FlagOverrideProvider
-from ..core.manual_price_provider import ManualPriceProvider
+from opensteuerauszug.core.exchange_rate_provider import ExchangeRateProvider
+
+
+from opensteuerauszug.core.flag_override_provider import FlagOverrideProvider
+from opensteuerauszug.core.manual_price_provider import ManualPriceProvider
+from opensteuerauszug.render.translations import Language, DEFAULT_LANGUAGE
 
 logger = logging.getLogger(__name__)
+
 
 class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
     """
     Calculator that fills in missing values based on other available data,
     potentially after Kursliste and minimal calculations have been performed.
     """
-    def __init__(self, mode: CalculationMode, exchange_rate_provider: ExchangeRateProvider, flag_override_provider: Optional[FlagOverrideProvider] = None, manual_price_provider: Optional[ManualPriceProvider] = None, keep_existing_payments: bool = False):
-        super().__init__(mode, exchange_rate_provider, flag_override_provider=flag_override_provider, keep_existing_payments=keep_existing_payments)
+
+    def __init__(
+        self,
+        mode: CalculationMode,
+        exchange_rate_provider: ExchangeRateProvider,
+        flag_override_provider: Optional[FlagOverrideProvider] = None,
+        manual_price_provider: Optional[ManualPriceProvider] = None,
+        keep_existing_payments: bool = False,
+        render_language: Language = DEFAULT_LANGUAGE,
+    ):
+        super().__init__(
+            mode,
+            exchange_rate_provider,
+            flag_override_provider=flag_override_provider,
+            keep_existing_payments=keep_existing_payments,
+            render_language=render_language,
+        )
         self.manual_price_provider = manual_price_provider
         self._securities_with_manual_prices = []  # Track which securities got manual prices
         logger.info(
@@ -34,7 +53,12 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
         # Check if we have a manual price AND non-zero quantity before calling parent (which may add warning)
         # Only suppress warnings for securities we'll actually apply manual prices to
         has_applicable_manual_price = False
-        if self.manual_price_provider and security.isin and security.taxValue and security.taxValue.referenceDate:
+        if (
+            self.manual_price_provider
+            and security.isin
+            and security.taxValue
+            and security.taxValue.referenceDate
+        ):
             # Only suppress warning if quantity is non-zero (we'll actually use the manual price)
             if security.taxValue.quantity != 0:
                 date_str = security.taxValue.referenceDate.strftime('%Y-%m-%d')
@@ -42,7 +66,11 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 has_applicable_manual_price = manual_price_info is not None
 
         # Store the count of missing entries before calling parent
-        missing_count_before = len(self._missing_kursliste_entries) if hasattr(self, '_missing_kursliste_entries') else 0
+        missing_count_before = (
+            len(self._missing_kursliste_entries)
+            if hasattr(self, '_missing_kursliste_entries')
+            else 0
+        )
 
         # Call parent to handle Kursliste lookup
         super()._handle_Security(security, path_prefix)
@@ -55,7 +83,7 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 removed_entry = self._missing_kursliste_entries.pop()
                 logger.debug(
                     "Suppressing missing Kursliste warning for %s (manual price available)",
-                    removed_entry
+                    removed_entry,
                 )
 
         # Don't reset _current_security here - it will be used by child elements like SecurityTaxValue
@@ -74,7 +102,11 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
             return
 
         #  Check if we have a manual price for this security
-        if not hasattr(self, '_current_security') or not self._current_security or not self._current_security.isin:
+        if (
+            not hasattr(self, '_current_security')
+            or not self._current_security
+            or not self._current_security.isin
+        ):
             return
 
         if not sec_tax_value.referenceDate:
@@ -88,8 +120,7 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
         # Try to get manual price
         date_str = sec_tax_value.referenceDate.strftime('%Y-%m-%d')
         manual_price_info = self.manual_price_provider.get_price(
-            self._current_security.isin,
-            date_str
+            self._current_security.isin, date_str
         )
 
         if manual_price_info:
@@ -116,7 +147,7 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 self._current_security.isin,
                 date_str,
                 price,
-                currency
+                currency,
             )
 
             # Convert price to CHF if needed
@@ -125,10 +156,7 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 rate = Decimal("1")
             else:
                 chf_price, rate = self._convert_to_chf(
-                    price,
-                    currency,
-                    f"{path_prefix}.exchangeRate",
-                    sec_tax_value.referenceDate
+                    price, currency, f"{path_prefix}.exchangeRate", sec_tax_value.referenceDate
                 )
 
             if chf_price is not None:
@@ -140,7 +168,9 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 # Mark as manual price (not from Kursliste)
                 self._set_field_value(sec_tax_value, "kursliste", False, path_prefix)
                 # Add note indicating this is a manual price
-                self._set_field_value(sec_tax_value, "name", "Manual price (not from official Kursliste)", path_prefix)
+                self._set_field_value(
+                    sec_tax_value, "name", "Manual price (not from official Kursliste)", path_prefix
+                )
 
     def computePayments(self, security: Security, path_prefix: str) -> None:
         if self.kursliste_manager:
@@ -161,16 +191,15 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
         if sec_payment.amountCurrency and sec_payment.paymentDate:
             payment_date = sec_payment.paymentDate
             amount = sec_payment.amount
-            
+
             chf_revenue, rate = self._convert_to_chf(
-                amount,
-                sec_payment.amountCurrency,
-                f"{path_prefix}.exchangeRate",
-                payment_date
+                amount, sec_payment.amountCurrency, f"{path_prefix}.exchangeRate", payment_date
             )
             self._set_field_value(sec_payment, "exchangeRate", rate, path_prefix)
 
-            if chf_revenue is not None and chf_revenue != Decimal(0): # Only process if there's actual revenue
+            if chf_revenue is not None and chf_revenue != Decimal(
+                0
+            ):  # Only process if there's actual revenue
                 if self._current_security_is_type_A is True:
                     self._set_field_value(sec_payment, "grossRevenueA", chf_revenue, path_prefix)
                     self._set_field_value(sec_payment, "grossRevenueB", Decimal(0), path_prefix)
@@ -178,6 +207,10 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                     self._set_field_value(sec_payment, "grossRevenueB", chf_revenue, path_prefix)
                     self._set_field_value(sec_payment, "grossRevenueA", Decimal(0), path_prefix)
                 elif self._current_security_is_type_A is None:
-                    raise ValueError(f"SecurityPayment at {path_prefix} has revenue, but parent Security has no country specified to determine Type A/B revenue.")
+                    raise ValueError(
+                        f"SecurityPayment at {path_prefix} has revenue, but parent Security has no country specified to determine Type A/B revenue."
+                    )
         else:
-            raise ValueError(f"SecurityPayment at {path_prefix} is missing amountCurrency or paymentDate.")
+            raise ValueError(
+                f"SecurityPayment at {path_prefix} is missing amountCurrency or paymentDate."
+            )

@@ -1,6 +1,6 @@
 """Performance section computation: per-position returns, sector splits, benchmarks.
 
-Reuses :func:`opensteuerauszug.util.performance_tab.compute_performance_records`
+Uses :func:`.perf_records.compute_performance_records`
 for the per-security P&L math (opening/closing/buys/sells/dividends, weighted-
 average FX, average-cost split of realized vs unrealized) so the GUI and the
 tax-overview dashboard always agree.
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from ...model.ech0196 import TaxStatement
-from ...util.performance_tab import PerformanceRecord, compute_performance_records
+from .perf_records import PerformanceRecord, compute_performance_records
 from .data import (
     BenchmarkComparison,
     PerformancePosition,
