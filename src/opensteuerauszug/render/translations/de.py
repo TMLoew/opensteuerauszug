@@ -51,6 +51,7 @@ TRANSLATIONS = {
     'notice_kursliste_partial_income': '; ausserdem stammt bei {count} Ertragsbuchung(en) über total {value} CHF die Angabe vom Broker statt aus der Kursliste',
     'notice_kursliste_partial_short': 'Die Steuerberechnungen basieren auf der Kursliste, ausser bei {positions} Position(en) (Steuerwert {value} CHF){income}, die vom Broker stammen; diese sind auf der Warnungsseite einzeln aufgeführt. Alle Angaben dienen nur Informationszwecken.',
     'notice_kursliste_partial_short_income': ' und {count} Ertragsbuchung(en)',
+    'warn_kursliste_rate_mismatch': 'Die Kursliste verwendet für die Zahlung vom {date} bei {identifier} den Umrechnungskurs {used} für einen in {currency} deklarierten Betrag; der amtliche {currency}-Kurs dieses Tages ist {expected}. Der ausgewiesene Ertrag von {reported} CHF weicht dadurch um {delta} CHF vom tatsächlich erhaltenen Betrag ab. Der Auszug übernimmt die Kursliste unverändert — bitte den Betrag prüfen und gegebenenfalls von Hand korrigieren.',
     # === BARCODE PAGE ===
     'barcode_page': 'Barcode Seite {page} von {total}',
     # === COMMON LABELS ===

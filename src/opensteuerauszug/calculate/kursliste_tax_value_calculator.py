@@ -123,6 +123,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         self._stock_split_warnings: List[dict] = []
         self._previous_year_exdate_warnings = []
         self._unsupported_payment_warnings: List[dict] = []
+        self._kursliste_rate_warnings: List[dict] = []
         self._all_securities: List[Security] = []
 
     def _translate(self, key: str) -> str:
@@ -133,6 +134,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         self._stock_split_warnings = []
         self._previous_year_exdate_warnings = []
         self._unsupported_payment_warnings = []
+        self._kursliste_rate_warnings = []
         # Collect all securities across all depots so that cross-security
         # split validation (valorNumberNew) can look up the target security.
         self._all_securities = []
@@ -169,6 +171,15 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                     identifier=warning_info["identifier"],
                 )
             )
+        for warning_info in self._kursliste_rate_warnings:
+            result.critical_warnings.append(
+                CriticalWarning(
+                    category=CriticalWarningCategory.MISSING_KURSLISTE,
+                    message=warning_info["message"],
+                    source="KurslisteTaxValueCalculator",
+                    identifier=warning_info["identifier"],
+                )
+            )
         for warning_info in self._unsupported_payment_warnings:
             result.critical_warnings.append(
                 CriticalWarning(
@@ -196,6 +207,59 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
             security.isin
             or (f"Valor {security.valorNumber}" if security.valorNumber else None)
             or security.securityName
+        )
+
+    def _check_kursliste_rate(self, security, pay, rate, amount) -> None:
+        """Flag a Kursliste rate that does not belong to the stated currency.
+
+        The Kursliste records B2Gold's 2025 dividends as USD but converts three
+        of the four at the Canadian rate — presumably the security's listing
+        currency rather than the payment's. The figure is reproduced faithfully
+        because the Kursliste is authoritative, but the taxpayer received more
+        than it reports, so the difference has to be visible rather than
+        silently absorbed.
+        """
+        if rate is None or not pay.currency or pay.currency == "CHF":
+            return
+        if not self.exchange_rate_provider or not pay.paymentDate:
+            return
+        try:
+            official = self.exchange_rate_provider.get_exchange_rate(
+                str(pay.currency), pay.paymentDate
+            )
+        except Exception:
+            return
+        if not official:
+            return
+        # 2% absorbs ordinary rounding; a wrong currency is off by far more.
+        if abs(Decimal(rate) - official) / official <= Decimal("0.02"):
+            return
+        reported = (amount or Decimal("0")) * Decimal(rate)
+        actual = (amount or Decimal("0")) * official
+        # A wrong rate on a tiny dividend is still a wrong rate, but saying so on
+        # a filed statement costs the reader more attention than the franc is
+        # worth. One franc is the floor: below it nothing anyone does changes.
+        if abs(actual - reported) < Decimal("1.00"):
+            logger.debug(
+                "Kursliste rate mismatch for %s on %s is below the reporting floor (%.2f CHF).",
+                security.isin or security.securityName,
+                pay.paymentDate,
+                actual - reported,
+            )
+            return
+        self._kursliste_rate_warnings.append(
+            {
+                "message": self._translate("warn_kursliste_rate_mismatch").format(
+                    date=pay.paymentDate,
+                    identifier=security.isin or security.securityName,
+                    used=rate,
+                    currency=pay.currency,
+                    expected=f"{official:.6f}",
+                    reported=f"{reported:.2f}",
+                    delta=f"{actual - reported:+.2f}",
+                ),
+                "identifier": self._security_identifier(security),
+            }
         )
 
     @staticmethod
@@ -885,6 +949,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                 chf_amount = Decimal("0")
 
             rate = pay.exchangeRate
+            self._check_kursliste_rate(security, pay, rate, amount)
             if rate is None and pay.paymentValueCHF != 0:
                 if pay.currency == "CHF":
                     rate = Decimal("1")

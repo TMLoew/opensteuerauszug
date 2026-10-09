@@ -51,6 +51,7 @@ TRANSLATIONS = {
     'notice_kursliste_partial_income': '; in addition, for {count} income entr(y/ies) totalling {value} CHF the figure comes from the broker rather than the Kursliste',
     'notice_kursliste_partial_short': 'Tax calculations are based on the Kursliste, except for {positions} position(s) (Steuerwert {value} CHF){income}, which come from the broker; these are listed individually on the warnings page. All figures are for information only.',
     'notice_kursliste_partial_short_income': ' and {count} income entr(y/ies)',
+    'warn_kursliste_rate_mismatch': 'For the payment on {date} for {identifier} the Kursliste applies exchange rate {used} to an amount declared in {currency}, while the official {currency} rate for that day is {expected}. The reported income of {reported} CHF therefore differs by {delta} CHF from what was actually received. The statement reproduces the Kursliste unchanged — check the amount and correct it by hand if needed.',
     # === BARCODE PAGE ===
     "barcode_page": "Barcode page {page} of {total}",
     # === COMMON LABELS ===
