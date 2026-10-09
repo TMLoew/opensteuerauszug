@@ -19,7 +19,7 @@ elsewhere (phase 4) — this module stays numeric and unit-free.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Iterable, List, Optional, Sequence, Tuple

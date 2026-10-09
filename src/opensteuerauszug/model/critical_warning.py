@@ -19,6 +19,8 @@ class CriticalWarningCategory(str, Enum):
     STOCK_SPLIT_MISMATCH = "stock_split_mismatch"
     UNMAPPED_SYMBOL = "unmapped_symbol"
     PREVIOUS_YEAR_EXDATE = "previous_year_exdate"
+    SHORT_POSITION = "short_position"
+    BROKER_VALUATION = "broker_valuation"
     OTHER = "other"
 
 

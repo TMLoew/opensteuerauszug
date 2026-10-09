@@ -74,9 +74,18 @@ class BaseCalculator:
             handler(cast(Any, model), path_prefix)
 
         # Get all fields that are BaseXmlModel instances or lists of BaseXmlModel
+        model_fields = type(model).model_fields
         for field_name, field_value in model.__dict__.items():
             # Skip internal fields and unknown_attrs
             if field_name.startswith('_') or field_name == 'unknown_attrs':
+                continue
+
+            # Fields excluded from serialization are internal bookkeeping, not
+            # part of the statement. Security.broker_payments in particular is a
+            # *copy* of the payments kept as evidence for reconciliation;
+            # visiting it would run every handler twice and mutate the evidence.
+            field_info = model_fields.get(field_name)
+            if field_info is not None and field_info.exclude:
                 continue
 
             field_path = f"{path_prefix}.{field_name}" if path_prefix else field_name

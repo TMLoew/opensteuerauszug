@@ -9,7 +9,10 @@ logger = logging.getLogger(__name__)
 
 from opensteuerauszug.model.position import SecurityPosition
 from opensteuerauszug.model.ech0196 import (
+    BankAccountNumber,
     BankAccountPayment,
+    Expense,
+    ListOfExpenses,
     Institution,
     ISINType,
     SecurityCategory,
@@ -19,6 +22,8 @@ from opensteuerauszug.model.ech0196 import (
     Client,
 )
 from opensteuerauszug.config.models import IbkrAccountSettings
+from opensteuerauszug.core.security import country_from_isin
+from opensteuerauszug.model.critical_warning import CriticalWarning, CriticalWarningCategory
 from opensteuerauszug.importers.common import (
     CashAccountEntry,
     CashPositionData,
@@ -37,6 +42,44 @@ from opensteuerauszug.importers.common import (
     to_decimal,
 )
 from opensteuerauszug.render.translations import get_text, Language, DEFAULT_LANGUAGE
+
+# Country of the IBKR legal entity that actually holds the account, keyed by
+# the `ibEntity` attribute of AccountInformation. Swiss clients are booked to
+# a handful of these; the cash accounts belong to that entity, not to the US.
+IBKR_ENTITY_TO_COUNTRY: Final[Dict[str, str]] = {
+    "IBLLC": "US",
+    "IBLLC-US": "US",
+    "IB-US": "US",
+    "IB-UK": "GB",
+    "IBUK": "GB",
+    "IBIE": "IE",
+    "IB-IE": "IE",
+    "IBCE": "HU",
+    "IB-CE": "HU",
+    "IB-LUX": "LU",
+    "IB-CAN": "CA",
+    "IBCAN": "CA",
+    "IB-AU": "AU",
+    "IB-HK": "HK",
+    "IB-IN": "IN",
+    "IB-JP": "JP",
+    "IB-SG": "SG",
+}
+
+# eCH-0196 expense types for the cash movements IBKR reports as costs. The
+# type is descriptive only — whether an expense is deductible is decided by the
+# assessing authority, so `expensesDeductible` is deliberately left unset.
+EXPENSE_TYPE_NEGATIVE_INTEREST: Final[str] = "29"  # Negativzinsen (Privatvermögen)
+EXPENSE_TYPE_MANAGEMENT: Final[str] = "15"  # Vermögensverwaltungskosten
+EXPENSE_TYPE_OTHER: Final[str] = "37"  # Diverse Gebühren
+
+# Used when the Flex data does not name the IBKR entity holding the account.
+DEFAULT_BANK_ACCOUNT_COUNTRY: Final[str] = "US"
+
+# Used when neither the Flex data nor the ISIN reveals an issuer country.
+# Most IBKR holdings of Swiss retail clients are US-listed, so this keeps the
+# historic behaviour, but every fallback is reported so the user can check.
+DEFAULT_SECURITY_COUNTRY: Final[str] = "US"
 
 IBKR_ASSET_CATEGORY_TO_ECH_SECURITY_CATEGORY: Final[Dict[str, SecurityCategory]] = {
     "STK": "SHARE",
@@ -90,7 +133,9 @@ class IbkrImporter:
                 error_desc = (
                     f"{object_description} (Symbol: " f"{getattr(data_object, 'symbol', 'N/A')})"
                 )
-            elif hasattr(data_object, 'accountId') and 'Account:' not in object_description:  # Avoid double "Account:"
+            elif (
+                hasattr(data_object, 'accountId') and 'Account:' not in object_description
+            ):  # Avoid double "Account:"
                 error_desc = (
                     f"{object_description} (Account: "
                     f"{getattr(data_object, 'accountId', 'N/A')})"
@@ -110,21 +155,170 @@ class IbkrImporter:
             raise ValueError(f"Empty required field '{field_name}' in {error_desc}.")
         return value
 
-    def _price_apply_multiplier(
-        self, data_object: Any, price: Decimal, object_description: str
-    ) -> Decimal:
-        """Helper to apply multiplier to quantity."""
-        if price:
-            value = getattr(data_object, "assetCategory", None)
-            if value in ["OPT", "FOP"]:
-                multiplier = self._to_decimal(
-                    self._get_required_field(data_object, "multiplier", object_description),
-                    "multiplier",
-                    object_description,
-                )
-                return price * multiplier
+    @staticmethod
+    def _build_multiplier_map(statement: Any) -> Dict[str, Decimal]:
+        """Map conid -> contract multiplier from the SecuritiesInfo section.
 
-        return price
+        Flex queries routinely omit ``multiplier`` on the Trade and OpenPosition
+        rows while still carrying it in SecuritiesInfo for every instrument.
+        Without it an option price is out by the contract size — a factor of 100
+        for US equity options — so fall back to this map rather than refusing
+        the export.
+        """
+        multipliers: Dict[str, Decimal] = {}
+        for info in getattr(statement, "SecuritiesInfo", None) or ():
+            conid = getattr(info, "conid", None)
+            multiplier = getattr(info, "multiplier", None)
+            if conid is None or multiplier is None:
+                continue
+            try:
+                multipliers[str(conid)] = Decimal(str(multiplier))
+            except Exception:
+                continue
+        return multipliers
+
+    @staticmethod
+    def _build_option_event_map(statement: Any) -> Dict[tuple, Any]:
+        """Map (conid, date) -> OptionAction from the OptionEAE section.
+
+        Expiry, assignment and exercise all reach the Trades section as a
+        zero-price book trade; only OptionEAE says which one it was. Keyed on
+        the option leg, so the stock leg of an assignment does not shadow it.
+        """
+        events: Dict[tuple, Any] = {}
+        for entry in getattr(statement, "OptionEAE", None) or ():
+            if getattr(entry, "assetCategory", None) not in ["OPT", "FOP"]:
+                continue
+            conid = getattr(entry, "conid", None)
+            event_date = getattr(entry, "date", None)
+            action = getattr(entry, "transactionType", None)
+            if conid is None or event_date is None or action is None:
+                continue
+            events[(str(conid), event_date)] = action
+        return events
+
+    @staticmethod
+    def _cash_transaction_identity(cash_tx: Any) -> tuple:
+        """Everything that identifies a cash movement except its time of day.
+
+        A Flex query that emits both the summary and the detail row for the
+        same movement produces two rows that agree on all of this; only the
+        detail row carries a time in ``dateTime``.
+        """
+        moment = getattr(cash_tx, "dateTime", None)
+        day = moment.date() if hasattr(moment, "date") else moment
+        return (
+            str(getattr(cash_tx, "type", None)),
+            getattr(cash_tx, "currency", None),
+            str(getattr(cash_tx, "conid", None)),
+            getattr(cash_tx, "description", None),
+            getattr(cash_tx, "amount", None),
+            day,
+        )
+
+    def _select_cash_transaction_level(
+        self, cash_transactions: Sequence[Any], account_id: str
+    ) -> List[Any]:
+        """Return one row per cash movement, or refuse if that cannot be decided.
+
+        A Flex query can emit cash transactions at more than one level of
+        detail. Every level repeats the same amounts, so importing all of them
+        doubles dividends, interest and fees — silently, and in the direction
+        that over-declares income and over-claims withholding tax.
+
+        When ``levelOfDetail`` is exported the levels can be told apart and the
+        summary rows are the ones to keep. When it is not, they cannot, so this
+        refuses rather than guessing which copy is real.
+        """
+        # IBKR marks the aggregate rows of a multi-level export with
+        # accountId="-". Those are dropped further down anyway, and counting
+        # them here would make a perfectly good export look duplicated.
+        candidates = [tx for tx in cash_transactions if not should_skip_pseudo_account_entry(tx)]
+        if len(candidates) < len(cash_transactions):
+            logger.info(
+                "Account %s: ignoring %d aggregate cash row(s) marked with a pseudo " "account id.",
+                account_id,
+                len(cash_transactions) - len(candidates),
+            )
+
+        levels = {
+            str(getattr(tx, "levelOfDetail", None)).upper()
+            for tx in candidates
+            if getattr(tx, "levelOfDetail", None) is not None
+        }
+        if levels and len(levels) > 1:
+            kept = [tx for tx in candidates if is_summary_level(tx)]
+            logger.warning(
+                "Account %s: cash transactions came at %d levels of detail (%s); "
+                "keeping the %d summary row(s) of %d and dropping the rest to avoid "
+                "counting every amount more than once.",
+                account_id,
+                len(levels),
+                ", ".join(sorted(levels)),
+                len(kept),
+                len(candidates),
+            )
+            return kept
+
+        seen: Dict[tuple, Any] = {}
+        repeated = 0
+        signature = False
+        for tx in candidates:
+            identity = self._cash_transaction_identity(tx)
+            previous = seen.get(identity)
+            if previous is None:
+                seen[identity] = tx
+                continue
+            repeated += 1
+            # The summary row has no time of day, the detail row does.
+            times = {
+                getattr(getattr(t, "dateTime", None), "time", lambda: None)()
+                for t in (previous, tx)
+            }
+            if len(times) > 1:
+                signature = True
+
+        if signature:
+            raise ValueError(
+                f"Account {account_id}: the Flex query exports cash transactions at "
+                f"more than one level of detail — {repeated} of "
+                f"{len(candidates)} rows repeat a movement that is already "
+                "present — and does not include the 'levelOfDetail' field, so the "
+                "copies cannot be told apart. Importing them would double every "
+                "dividend, interest payment and fee. Re-run the Flex Query with a "
+                "single level of detail selected for Cash Transactions (or add the "
+                "'Level of Detail' field) and export again."
+            )
+        return candidates
+
+    def _price_apply_multiplier(
+        self,
+        data_object: Any,
+        price: Decimal,
+        object_description: str,
+        multipliers: Optional[Dict[str, Decimal]] = None,
+    ) -> Decimal:
+        """Scale a per-share option price up to the price of one contract."""
+        if not price:
+            return price
+        if getattr(data_object, "assetCategory", None) not in ["OPT", "FOP"]:
+            return price
+
+        raw_multiplier = getattr(data_object, "multiplier", None)
+        if raw_multiplier is not None:
+            return price * self._to_decimal(raw_multiplier, "multiplier", object_description)
+
+        conid = getattr(data_object, "conid", None)
+        from_info = (multipliers or {}).get(str(conid)) if conid is not None else None
+        if from_info is not None:
+            return price * from_info
+
+        raise ValueError(
+            f"Missing required field 'multiplier' in {object_description} and the "
+            "SecuritiesInfo section does not provide one for this contract either. "
+            "Re-run the Flex Query with the 'Multiplier' field, or include the "
+            "'Securities Info' section."
+        )
 
     def _to_decimal(
         self, value: object | None, field_name: str, object_description: str
@@ -237,11 +431,32 @@ class IbkrImporter:
                         filename,
                     )
             except FlexParserError as e:
-                raise ValueError(f"Failed to parse {error_label} {filename} with ibflex: {e}")
+                raise ValueError(
+                    f"Failed to parse {error_label} {filename} with ibflex: {e}"
+                    + self._flex_parse_hint(e)
+                )
             except Exception as e:
                 raise RuntimeError(f"An unexpected error occurred while parsing {filename}: {e}")
 
         return statements
+
+    @staticmethod
+    def _flex_parse_hint(error: Exception) -> str:
+        """Turn a parser complaint into something the reader can act on.
+
+        The Flex Query offers cash transaction types that the parser has no
+        mapping for. Selecting one makes the *whole* export unreadable, and the
+        bare message does not say which box to untick.
+        """
+        message = str(error)
+        if "is not a valid CashAction" not in message:
+            return ""
+        supported = ", ".join(sorted(action.value for action in ibflex.CashAction))
+        return (
+            " — this cash transaction type cannot be imported and makes the whole "
+            "export unreadable. Untick it in the Cash Transactions section of the "
+            f"Flex Query. The types that can be imported are: {supported}."
+        )
 
     def _find_processed_security_position(
         self,
@@ -396,6 +611,222 @@ class IbkrImporter:
                 corrections_count,
             )
 
+    # IBKR's own per-currency totals, and the cash transaction types that have to
+    # add up to each of them. Only categories whose mapping is unambiguous are
+    # listed, because a check that cries wolf on a tax document is worse than no
+    # check at all.
+    #
+    # `brokerInterest` was held back until its meaning was settled, since
+    # received-only and net-of-paid would each need a different sum. It is net:
+    # in a 2025 export it reports USD 20.56, which is exactly 857.85 received
+    # minus 837.29 paid, and HKD 260.79 for an account with no HKD debit
+    # interest. Hence both the received and the paid action below.
+    CASH_REPORT_CHECKS: Final[tuple] = (
+        ("dividends", "dividends", (ibflex.CashAction.DIVIDEND,)),
+        ("payments in lieu of dividends", "paymentInLieu", (ibflex.CashAction.PAYMENTINLIEU,)),
+        ("withholding tax", "withholdingTax", (ibflex.CashAction.WHTAX,)),
+        ("other fees", "otherFees", (ibflex.CashAction.FEES,)),
+        (
+            "broker interest",
+            "brokerInterest",
+            (ibflex.CashAction.BROKERINTRCVD, ibflex.CashAction.BROKERINTPAID),
+        ),
+    )
+
+    def _verify_against_cash_report(
+        self,
+        tax_statement: TaxStatement,
+        all_flex_statements: Sequence[Any],
+        booked_cash: Dict[tuple, Decimal],
+        tolerance: Decimal = Decimal("0.01"),
+    ) -> None:
+        """Check what was taken in against the broker's own category totals.
+
+        The Cash Report is IBKR summing the same movements independently, so it
+        is the one check here that does not rely on our own reading of the
+        transaction rows. A statement whose dividends are doubled or whose
+        withholding is missing looks entirely plausible otherwise.
+
+        Reported rather than raised: the divergence may equally mean the export
+        is incomplete, and refusing would leave the reader with nothing.
+        """
+        totals: Dict[tuple, Decimal] = defaultdict(Decimal)
+        available: set = set()
+        for stmt in all_flex_statements:
+            for row in getattr(stmt, "CashReport", None) or ():
+                if should_skip_pseudo_account_entry(row):
+                    continue
+                currency = getattr(row, "currency", None)
+                if currency is None or str(currency) == "BASE_SUMMARY":
+                    continue
+                for _label, attribute, _types in self.CASH_REPORT_CHECKS:
+                    value = getattr(row, attribute, None)
+                    if value is None:
+                        continue
+                    available.add(attribute)
+                    totals[(str(currency), attribute)] += Decimal(str(value))
+
+        if not available:
+            # Only a log line: the check being unavailable is not itself a defect in
+            # the statement, and a critical warning on every export that did not tick
+            # these optional boxes would train the reader to ignore the ones that matter.
+            logger.warning(
+                "The Flex export's Cash Report carries no category totals, so the imported "
+                "amounts could not be cross-checked against the broker's own figures. "
+                "Select Dividends, Withholding Tax, Payment In Lieu and Other Fees in the "
+                "Flex Query's Cash Report section to enable that check."
+            )
+            return
+
+        discrepancies: List[str] = []
+        for label, attribute, types in self.CASH_REPORT_CHECKS:
+            if attribute not in available:
+                continue
+            currencies = {c for (c, a) in totals if a == attribute}
+            currencies |= {c for (c, t) in booked_cash if t in types}
+            for currency in sorted(currencies):
+                reported = totals.get((currency, attribute), Decimal("0"))
+                imported = sum(
+                    (booked_cash.get((currency, t), Decimal("0")) for t in types), Decimal("0")
+                )
+                delta = imported - reported
+                if abs(delta) > tolerance:
+                    discrepancies.append(
+                        f"{label} {currency}: broker reports {reported:.2f}, "
+                        f"imported {imported:.2f} (off by {delta:+.2f})"
+                    )
+
+        if not discrepancies:
+            logger.info(
+                "Imported cash matches the broker's own Cash Report totals for %s.",
+                ", ".join(sorted(available)),
+            )
+            return
+
+        listed = "; ".join(discrepancies)
+        logger.error("Imported cash disagrees with the broker's Cash Report: %s", listed)
+        tax_statement.critical_warnings.append(
+            CriticalWarning(
+                category=CriticalWarningCategory.OTHER,
+                message=(
+                    "THE AMOUNTS IN THIS STATEMENT DO NOT MATCH THE BROKER'S OWN TOTALS: "
+                    f"{listed}. Do not file this statement until the difference is "
+                    "explained. It usually means the export lists transactions at more "
+                    "than one level of detail, or that a transaction type is missing "
+                    "from it."
+                ),
+                source="IbkrImporter",
+            )
+        )
+
+    @staticmethod
+    def _build_list_of_expenses(
+        tax_statement: TaxStatement,
+        expense_items: Sequence[tuple[str, Decimal, str, str]],
+        account_id: str,
+    ) -> None:
+        """Put broker costs into the Spesenverzeichnis.
+
+        The CHF figure and exchange rate are filled in later, once a rate
+        provider is available. ``expensesDeductible`` is left unset on purpose:
+        whether a cost is deductible is the assessing authority's call, not
+        this tool's.
+        """
+        if not expense_items:
+            return
+        expenses = [
+            Expense(
+                referenceDate=payment_date,
+                name=description[:200],
+                amountCurrency=currency,
+                amount=abs(amount),
+                expenseType=expense_type,
+                bankAccountNumber=BankAccountNumber(f"{account_id}-{currency}"),
+            )
+            for description, amount, currency, expense_type, payment_date in expense_items
+        ]
+        tax_statement.listOfExpenses = ListOfExpenses(expense=expenses)
+
+    @staticmethod
+    def _warn_about_omitted_cash(
+        tax_statement: TaxStatement,
+        omitted_cash_items: Sequence[tuple[str, Decimal, str, str]],
+    ) -> None:
+        """Put the cash movements we left out on the statement itself.
+
+        Fees and negative credit interest belong in an expenses section
+        (eCH-0196 ``listOfExpenses``) that we do not produce yet. Reporting the
+        totals as a critical warning means they show up on the instructions
+        page of the PDF, so the reader can decide whether to claim them,
+        instead of the money vanishing with only a log line.
+        """
+        if not omitted_cash_items:
+            return
+        totals: Dict[str, Decimal] = {}
+        for _description, amount, currency, _expense_type, _payment_date in omitted_cash_items:
+            totals[currency] = totals.get(currency, Decimal("0")) + abs(amount)
+        rendered = ", ".join(f"{amount:.2f} {currency}" for currency, amount in totals.items())
+        tax_statement.critical_warnings.append(
+            CriticalWarning(
+                category=CriticalWarningCategory.OTHER,
+                message=(
+                    f"{len(omitted_cash_items)} cost(s) totalling {rendered} (broker fees, "
+                    "ADR fees, advisor fees, negative credit interest) are listed in the "
+                    "expenses register. Whether they are deductible is for the assessing "
+                    "authority to decide, so no deductible amount is claimed here."
+                ),
+                source="IbkrImporter",
+            )
+        )
+
+    @staticmethod
+    def _warn_about_interest_withholding(
+        tax_statement: TaxStatement,
+        interest_withholding: Sequence[tuple[str, Decimal, str]],
+    ) -> None:
+        """Report foreign tax withheld from interest, which the format cannot carry.
+
+        eCH-0196 gives a bank account payment no DA-1 attributes, so tax deducted
+        from interest can only travel as evidence. It may still be creditable, so
+        the reader has to be told it exists rather than finding a payment row that
+        quietly contributes nothing.
+        """
+        if not interest_withholding:
+            return
+        totals: Dict[str, Decimal] = {}
+        for _description, amount, currency in interest_withholding:
+            totals[currency] = totals.get(currency, Decimal("0")) + abs(amount)
+        swiss = {c: a for c, a in totals.items() if c == "CHF"}
+        foreign = {c: a for c, a in totals.items() if c != "CHF"}
+        parts = []
+        if swiss:
+            # Swiss withholding on interest is expressible (bankAccountPaymentType
+            # has withHoldingTaxClaim) — this tool just does not derive it from a
+            # separate tax row yet.
+            parts.append(
+                ", ".join(f"{a:.2f} {c}" for c, a in swiss.items())
+                + " of Swiss withholding tax (Verrechnungssteuer)"
+            )
+        if foreign:
+            parts.append(
+                ", ".join(f"{a:.2f} {c}" for c, a in foreign.items())
+                + " of foreign withholding tax, which eCH-0196 cannot express on a bank "
+                "account payment at all"
+            )
+        tax_statement.critical_warnings.append(
+            CriticalWarning(
+                category=CriticalWarningCategory.OTHER,
+                message=(
+                    "Tax was withheld from interest that is not linked to a security: "
+                    + "; and ".join(parts)
+                    + ". It is carried as evidence only and is NOT claimed anywhere in this "
+                    "statement. Claim it on the Wertschriftenverzeichnis (Verrechnungssteuer) "
+                    "or the DA-1 form (foreign) yourself."
+                ),
+                source="IbkrImporter",
+            )
+        )
+
     def import_files(
         self, filenames: List[str], corrections_filenames: Optional[List[str]] = None
     ) -> TaxStatement:
@@ -448,6 +879,15 @@ class IbkrImporter:
             lambda: {'stocks': [], 'payments': []}
         )
         security_country_map: Dict[SecurityPosition, str] = {}
+        # Cash movements we deliberately leave out of the statement, recorded so
+        # the user is told what is missing instead of only seeing a log line.
+        omitted_cash_items: List[tuple[str, Decimal, str, str, date]] = []
+        saw_withholding_rows = False
+        saw_income_rows = False
+        booked_cash: defaultdict[tuple, Decimal] = defaultdict(Decimal)
+        # Withholding tax on interest, which eCH-0196 cannot express on a bank
+        # account payment: (description, amount, currency).
+        interest_withholding: List[tuple[str, Decimal, str]] = []
 
         # Map to store assetCategory and subCategory for each security
         security_asset_category_map: Dict[SecurityPosition, tuple[str, Optional[str]]] = {}
@@ -457,6 +897,8 @@ class IbkrImporter:
             account_id = self._get_required_field(stmt, 'accountId', 'FlexStatement')
             # account_id_processed = account_id # Keep track for summary
             logger.info(f"Processing statement for account: {account_id}")
+            multipliers = self._build_multiplier_map(stmt)
+            option_events = self._build_option_event_map(stmt)
 
             def should_skip_entry(entry: Any, entry_label: str) -> bool:
                 if should_skip_pseudo_account_entry(entry):
@@ -499,7 +941,7 @@ class IbkrImporter:
                         f"Trade {symbol}",
                     )
                     trade_price = self._price_apply_multiplier(
-                        trade, trade_price, f"Trade {symbol}"
+                        trade, trade_price, f"Trade {symbol}", multipliers
                     )
 
                     trade_money = self._to_decimal(
@@ -563,26 +1005,42 @@ class IbkrImporter:
                     name = get_text(buy_sell.value.lower(), self.render_language)
                     # Trade price is 0 for expired, assigned or exercised options.
                     if trade_price == Decimal(0) and asset_category in ["OPT", "FOP"]:
-                        if transaction_type is None:
-                            raise ValueError(
-                                f"Transaction type is missing for category {asset_category} with zero price"
+                        # The OptionEAE section says exactly which of the three
+                        # happened, so prefer it over guessing from closePrice.
+                        eae_action = option_events.get((conid, trade_date))
+                        if eae_action is not None:
+                            name = get_text(
+                                (
+                                    'option_expiration'
+                                    if eae_action == ibflex.enums.OptionAction.EXPIRE
+                                    else 'option_assignment'
+                                ),
+                                self.render_language,
                             )
-                        if transaction_type == TradeType.BOOKTRADE:
-                            if close_price is None:
-                                raise ValueError(
-                                    f"Close price is missing for category {asset_category} with zero price"
-                                )
+                        elif transaction_type == TradeType.BOOKTRADE and close_price is not None:
                             if close_price == Decimal(0) and (
                                 expiry_date is None
                                 or expiry_date is not None
                                 and expiry_date == trade_date
                             ):
-                                # For expired options with zero close price, we can assume they expired worthless. However, we need corresponding OptionEAE entry to be sure. But taxwise it does not matter.
+                                # Expired worthless. Without an OptionEAE entry this is
+                                # inferred, but it makes no difference for tax purposes.
                                 name = get_text('option_expiration', self.render_language)
                             elif close_price != Decimal(0):
-                                name = get_text(
-                                    'option_assignment', self.render_language
-                                )  # can be assignemnt or exercise, but for that we would need to link the trade to the corresponding OptionEAE entry
+                                name = get_text('option_assignment', self.render_language)
+                        else:
+                            # Neither source is in the export. The quantity, date and
+                            # zero price — everything that is tax relevant — are known,
+                            # so only the label is affected; carry on.
+                            logger.warning(
+                                "Zero-price %s trade for %s on %s cannot be classified as "
+                                "expiry, assignment or exercise: the export has neither an "
+                                "OptionEAE section nor a closePrice. The position change is "
+                                "imported, only its label is generic.",
+                                asset_category,
+                                symbol,
+                                trade_date,
+                            )
                         unit_price = Decimal(0)
 
                     stock_mutation = SecurityStock(
@@ -670,7 +1128,7 @@ class IbkrImporter:
                             open_pos.markPrice, 'markPrice', f"OpenPosition {symbol}"
                         )
                         mark_price = self._price_apply_multiplier(
-                            open_pos, mark_price, f"OpenPosition {symbol}"
+                            open_pos, mark_price, f"OpenPosition {symbol}", multipliers
                         )
 
                     pos_value = None
@@ -727,15 +1185,26 @@ class IbkrImporter:
                     direction = transfer.direction
                     direction_val = direction.value.upper() if direction else None
                     is_cancel = ibflex.Code.CANCEL in (transfer.code or ())
-                    if direction_val == 'OUT' and quantity > 0 and not is_cancel:
-                        raise ValueError(
-                            f"Transfer direction OUT but quantity {quantity} positive"
-                            f" for {symbol}"
-                        )
-                    if direction_val == 'IN' and quantity < 0 and not is_cancel:
-                        raise ValueError(
-                            f"Transfer direction IN but quantity {quantity} negative"
-                            f" for {symbol}"
+                    # IBKR encodes a transfer that opens a short position as
+                    # direction IN with a negative quantity (and the mirror case
+                    # on the way out). The quantity is what moves the position,
+                    # so it is authoritative; the mismatch is worth noting but
+                    # not worth refusing the whole export over. Whether the
+                    # resulting negative balance is acceptable is decided once,
+                    # in CleanupCalculator.
+                    if (
+                        direction_val == 'OUT'
+                        and quantity > 0
+                        or direction_val == 'IN'
+                        and quantity < 0
+                    ) and not is_cancel:
+                        logger.warning(
+                            "Transfer direction %s but quantity %s for %s; following the "
+                            "quantity. This is how IBKR reports transfers that open or "
+                            "close a short position.",
+                            direction_val,
+                            quantity,
+                            symbol,
                         )
 
                     currency = self._get_required_field(transfer, 'currency', 'Transfer')
@@ -850,7 +1319,10 @@ class IbkrImporter:
 
             # --- Process Cash Transactions ---
             if stmt.CashTransactions:
-                for cash_tx in stmt.CashTransactions:
+                cash_transactions = self._select_cash_transaction_level(
+                    stmt.CashTransactions, account_id
+                )
+                for cash_tx in cash_transactions:
                     if should_skip_entry(cash_tx, "CashTransaction"):
                         continue
                     tx_date_time = self._get_required_field(cash_tx, 'dateTime', 'CashTransaction')
@@ -871,23 +1343,50 @@ class IbkrImporter:
                     )
                     currency = self._get_required_field(cash_tx, 'currency', 'CashTransaction')
 
+                    # Everything we take in, tallied per category, so it can be
+                    # checked against IBKR's own totals once the loop is done.
+                    if cash_tx.type is not None:
+                        booked_cash[(str(currency), cash_tx.type)] += amount
+
                     security_id = cash_tx.conid
                     tx_type = cash_tx.type
                     if tx_type is None:
                         raise ValueError(f"CashTransaction type is missing for {description}")
 
+                    if tx_type == ibflex.CashAction.WHTAX:
+                        saw_withholding_rows = True
+                    elif tx_type in (
+                        ibflex.CashAction.DIVIDEND,
+                        ibflex.CashAction.PAYMENTINLIEU,
+                        ibflex.CashAction.BONDINTRCVD,
+                    ):
+                        saw_income_rows = True
+
                     # Skip fees even if they are associated with a security (e.g., ADR fees)
                     if tx_type in [ibflex.CashAction.FEES, ibflex.CashAction.ADVISORFEES]:
-                        logger.warning(f"Fees paid for {description} are ignored for statement.")
+                        logger.info("Fee on %s recorded as an expense.", description)
+                        omitted_cash_items.append(
+                            (description, amount, currency, EXPENSE_TYPE_OTHER, tx_date)
+                        )
                         continue
 
                     if security_id:
                         tx_type_str = tx_type.value
                         tx_type_str_lower = str(tx_type_str).lower()
                         asset_category = getattr(cash_tx, 'assetCategory', None)
-                        # We assert that we do not book general broker/cash interest accidentally under a security.
-                        # However, bond interest is fine at import time (assetCategory == "BOND").
-                        assert 'interest' not in tx_type_str_lower or asset_category == 'BOND'
+                        # Guard against booking general broker/cash interest under a
+                        # security, which would misreport it as securities income.
+                        # Bond interest is fine at import time (assetCategory == "BOND").
+                        # This used to be a bare `assert`, which disappears under
+                        # `python -O` and would let the bad booking through silently.
+                        if 'interest' in tx_type_str_lower and asset_category != 'BOND':
+                            raise ValueError(
+                                f"CashTransaction of type {tx_type_str} is linked to security "
+                                f"conid={security_id} but has assetCategory "
+                                f"{asset_category!r} rather than BOND: "
+                                f"{description}. Booking it under the security would "
+                                "report broker interest as securities income."
+                            )
 
                         sec_pos_key = self._find_processed_security_position(
                             processed_security_positions,
@@ -940,21 +1439,47 @@ class IbkrImporter:
                                 # Tax relevant event. Fall through to create a bank payment.
                                 pass
                             else:
-                                # TODO: CREDIT INT is charged on positive balance and would belong to fees (not liabilities).
-                                logger.warning(
-                                    f"Broker credit interest payment {description} with amount {amount} is not handled, would belong to fees."
+                                # Negative credit interest on a positive balance
+                                # is an expense (eCH-0196 expenseType 29,
+                                # "Negativzinsen im Privatvermoegen"), not debt
+                                # interest, so it must not land in the liability
+                                # section. There is no expenses section yet.
+                                logger.info(
+                                    "Broker interest charge %s (%s) recorded as an expense.",
+                                    description,
+                                    amount,
+                                )
+                                omitted_cash_items.append(
+                                    (
+                                        description,
+                                        amount,
+                                        currency,
+                                        (
+                                            EXPENSE_TYPE_NEGATIVE_INTEREST
+                                            if "CREDIT INT" in description.upper()
+                                            else EXPENSE_TYPE_OTHER
+                                        ),
+                                        tx_date,
+                                    )
                                 )
                                 continue
-                        elif tx_type in [ibflex.CashAction.FEES]:
-                            # TODO: Optionally create a costs sections.
-                            logger.warning(
-                                f"Fees paid for {description} are ignored for statement."
-                            )
-                            continue
-                        elif tx_type in [ibflex.CashAction.ADVISORFEES]:
-                            # TODO: Optionally create a costs sections.
-                            logger.warning(
-                                f"Fees paid for {description} are ignored for statement."
+                        elif tx_type in [
+                            ibflex.CashAction.FEES,
+                            ibflex.CashAction.ADVISORFEES,
+                        ]:
+                            logger.info("Fee %s recorded as an expense.", description)
+                            omitted_cash_items.append(
+                                (
+                                    description,
+                                    amount,
+                                    currency,
+                                    (
+                                        EXPENSE_TYPE_MANAGEMENT
+                                        if tx_type == ibflex.CashAction.ADVISORFEES
+                                        else EXPENSE_TYPE_OTHER
+                                    ),
+                                    tx_date,
+                                )
                             )
                             continue
                         elif tx_type in [ibflex.CashAction.BROKERINTRCVD]:
@@ -968,6 +1493,9 @@ class IbkrImporter:
                             raise ValueError(
                                 f"CashTransaction type {tx_type} is not supported for {description}"
                             )
+                        if tx_type == ibflex.CashAction.WHTAX:
+                            interest_withholding.append((description, amount, currency))
+
                         cash_pos_key = (account_id, currency, "MAIN_CASH")
 
                         bank_payment = BankAccountPayment(
@@ -975,6 +1503,7 @@ class IbkrImporter:
                             name=description,
                             amountCurrency=currency,
                             amount=amount,
+                            is_withholding_tax=(tx_type == ibflex.CashAction.WHTAX),
                         )
                         processed_cash_positions[cash_pos_key]['payments'].append(bank_payment)
 
@@ -1005,6 +1534,10 @@ class IbkrImporter:
             if getattr(s, "account_number", None)
         }
 
+        # Positions where neither the Flex data nor the ISIN told us a country
+        # and we had to fall back to the default.
+        guessed_country_positions: List[str] = []
+
         def _hints_for(sec_pos: SecurityPosition) -> PositionHints:
             asset_cat, _sub_category = security_asset_category_map.get(sec_pos, ("STK", None))
             sec_category = IBKR_ASSET_CATEGORY_TO_ECH_SECURITY_CATEGORY.get(asset_cat)
@@ -1012,9 +1545,17 @@ class IbkrImporter:
                 raise ValueError(f"Unknown asset category: {asset_cat}")
             is_rights = sec_pos in rights_issue_positions
             skip_if_zero = is_rights and ignore_rights_issues_by_account.get(sec_pos.depot, False)
+            # IBKR leaves issuerCountryCode empty on many rows (notably
+            # derivatives and older data). The ISIN prefix is a far better
+            # second source than assuming the security is American, because the
+            # country drives the DA-1 grouping in the statement.
+            country = security_country_map.get(sec_pos) or country_from_isin(sec_pos.isin)
+            if not country:
+                country = DEFAULT_SECURITY_COUNTRY
+                guessed_country_positions.append(sec_pos.get_processing_identifier())
             return PositionHints(
                 security_category=sec_category,
-                country=security_country_map.get(sec_pos, "US"),
+                country=country,
                 is_rights_issue=is_rights,
                 skip_if_zero=skip_if_zero,
             )
@@ -1026,8 +1567,19 @@ class IbkrImporter:
             hints_for=_hints_for,
         )
 
+        if guessed_country_positions:
+            logger.warning(
+                "No issuer country in the Flex data and no ISIN for %d position(s); "
+                "defaulted to '%s'. Verify the country column for: %s%s",
+                len(guessed_country_positions),
+                DEFAULT_SECURITY_COUNTRY,
+                ", ".join(guessed_country_positions[:10]),
+                "..." if len(guessed_country_positions) > 10 else "",
+            )
+
         # --- Collect per-account dateOpened / dateClosed + CashReport seeds ---
         account_dates: Dict[str, Dict[str, date | None]] = {}
+        account_countries: Dict[str, str] = {}
         for s_stmt in all_flex_statements:
             stmt_account_id = self._get_required_field(s_stmt, 'accountId', 'FlexStatement')
             if s_stmt.AccountInformation:
@@ -1036,6 +1588,18 @@ class IbkrImporter:
                     'dateOpened': acc_info.dateOpened,
                     'dateClosed': acc_info.dateClosed,
                 }
+                entity = str(getattr(acc_info, 'ibEntity', None) or '').strip().upper()
+                entity_country = IBKR_ENTITY_TO_COUNTRY.get(entity)
+                if entity_country:
+                    account_countries[stmt_account_id] = entity_country
+                elif entity:
+                    logger.warning(
+                        "Unknown IBKR entity '%s' for account %s; "
+                        "reporting the cash accounts under '%s'.",
+                        entity,
+                        stmt_account_id,
+                        DEFAULT_BANK_ACCOUNT_COUNTRY,
+                    )
 
         seed_entries: List[CashAccountEntry] = []
         for s_stmt in all_flex_statements:
@@ -1081,6 +1645,7 @@ class IbkrImporter:
                         closing_balance=closing_balance_value,
                         name=f"{account_id} {curr}",
                         number=f"{account_id}-{curr}",
+                        country=account_countries.get(account_id, DEFAULT_BANK_ACCOUNT_COUNTRY),
                         opening_date=dates_for_account.get('dateOpened'),
                         closing_date=dates_for_account.get('dateClosed'),
                     )
@@ -1088,6 +1653,37 @@ class IbkrImporter:
 
         cash_entries = fold_cash_payments(seed_entries, processed_cash_positions)
         augment_list_of_bank_accounts(tax_statement, cash_entries)
+
+        self._verify_against_cash_report(tax_statement, all_flex_statements, booked_cash)
+        self._build_list_of_expenses(
+            tax_statement, omitted_cash_items, all_flex_statements[0].accountId or ""
+        )
+        self._warn_about_omitted_cash(tax_statement, omitted_cash_items)
+        self._warn_about_interest_withholding(tax_statement, interest_withholding)
+
+        if saw_income_rows and not saw_withholding_rows:
+            tax_statement.broker_reports_withholding_tax = False
+            logger.warning(
+                "The Flex export reports dividends but not a single withholding tax "
+                "row. Add the 'Withholding Tax' cash transaction type to the Flex "
+                "Query if tax was deducted."
+            )
+            tax_statement.critical_warnings.append(
+                CriticalWarning(
+                    category=CriticalWarningCategory.OTHER,
+                    message=(
+                        "The broker export contains dividends but no withholding tax "
+                        "records at all. Any Verrechnungssteuer or DA-1 claim in this "
+                        "statement therefore rests on the Kursliste alone and was not "
+                        "checked against what was withheld. If tax was deducted, re-run "
+                        "the Flex Query with the 'Withholding Tax' cash transaction type "
+                        "selected."
+                    ),
+                    source="IbkrImporter",
+                )
+            )
+        elif saw_withholding_rows:
+            tax_statement.broker_reports_withholding_tax = True
 
         logger.info(
             "Partial TaxStatement created with Trades, OpenPositions, "

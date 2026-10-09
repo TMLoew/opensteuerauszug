@@ -11,7 +11,6 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from openpyxl import Workbook
 
 from opensteuerauszug.render.tax_overview.data import (
     FeeEvent,

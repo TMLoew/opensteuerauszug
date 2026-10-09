@@ -209,6 +209,16 @@ def process(
         "--corrections-flex",
         help="IBKR Flex Query XML file(s) covering the post-year-end period (e.g. Jan–Mar of the following year). Only withholding-tax CashTransactions whose settleDate falls within the tax period are imported, allowing 1042-S corrections to be netted.",
     ),
+    allow_short_positions: bool = typer.Option(
+        False,
+        "--allow-short-positions",
+        help=(
+            "Accept securities with a negative balance (written options, short stock) "
+            "and report them as negative holdings instead of stopping. How short "
+            "positions must be declared is not settled in Swiss practice; read "
+            "docs/short_positions.md before using this."
+        ),
+    ),
     use_broker_withholding: UseBrokerWithholding = typer.Option(
         UseBrokerWithholding.CAP,
         "--use-broker-withholding",
@@ -675,6 +685,9 @@ def process(
             print("Import successful.")
             dump_debug_model(current_phase.value, statement)
 
+        # Set up by the calculate phase, but the reconcile phase can run alone.
+        exchange_rate_provider: Optional[ExchangeRateProvider] = None
+
         if Phase.CALCULATE in run_phases:
             current_phase = Phase.CALCULATE
             print(f"Phase: {current_phase.value}")
@@ -710,6 +723,9 @@ def process(
                 override_org_nr=org_nr,
                 config_settings=general_config_settings,
                 render_language=render_language,
+                allow_short_positions=(
+                    allow_short_positions or calculate_settings.allow_short_positions
+                ),
             )
             statement = cleanup_calculator.calculate(statement)
             print(
@@ -719,7 +735,6 @@ def process(
                 current_phase.value + "_after_cleanup", statement
             )  # Optional intermediate dump
 
-            exchange_rate_provider: ExchangeRateProvider
             effective_kursliste_dir = resolve_kursliste_dir(kursliste_dir)
             print(f"Using KurslisteExchangeRateProvider with directory: {effective_kursliste_dir}")
             try:
@@ -788,13 +803,21 @@ def process(
             # --- 3. Cap withholding to broker level (if enabled) ---
             if use_broker_withholding == UseBrokerWithholding.CAP:
                 print("Running WithholdingCapCalculator...")
-                cap_calculator = WithholdingCapCalculator()
+                cap_calculator = WithholdingCapCalculator(
+                    exchange_rate_provider=exchange_rate_provider
+                )
                 statement = cap_calculator.calculate(statement)
                 if cap_calculator.capped_securities:
                     for sec_name, dates in cap_calculator.capped_securities.items():
                         print(
                             f"  Capped withholding for {sec_name} on {', '.join(str(d) for d in dates)}"
                         )
+                for sec_name, dates in cap_calculator.unconvertible_withholding.items():
+                    print(
+                        f"  Could NOT compare broker withholding for {sec_name} on "
+                        f"{', '.join(str(d) for d in dates)} (no exchange rate); "
+                        "the Kursliste value was kept — verify it by hand."
+                    )
                 dump_debug_model(current_phase.value + "_after_withholding_cap", statement)
 
             # --- 4. Run TotalCalculator (or other main calculators) ---
@@ -926,6 +949,7 @@ def process(
             reconciliation_calculator = PaymentReconciliationCalculator(
                 tolerance_chf=calculate_settings.tolerance,
                 allow_above_treaty_withholding=calculate_settings.allow_above_treaty_withholding,
+                exchange_rate_provider=exchange_rate_provider,
             )
             statement = reconciliation_calculator.calculate(statement)
             report = statement.payment_reconciliation_report
@@ -1043,6 +1067,20 @@ def process(
                         print(f"Appending {len(post_amble)} document(s)...")
                         for path in post_amble:
                             merger.append(path)
+
+                    # PdfWriter.append() copies pages, not the document-level
+                    # embedded-file names, so the eCH-0196 XML attachment that
+                    # render_tax_statement added would be lost in the merge.
+                    try:
+                        merger.add_attachment(
+                            f"{statement.id or 'taxstatement'}.xml",
+                            statement.to_xml_bytes(),
+                        )
+                    except Exception as attach_e:
+                        print(
+                            "Warning: could not re-attach the eCH-0196 XML to the "
+                            f"merged PDF: {attach_e}"
+                        )
 
                     # Write the final merged PDF directly to the output file
                     merger.write(output_file)

@@ -691,11 +691,13 @@ class TransactionExtractor:
             "Foreign Tax Paid",
             "IRS Withhold Adj",
         ):
-            # Withholding-tax related entries only ever influence nonRecoverableTax,
-            # never grossRevenueB. A negative schwab_amount means tax was withheld
-            # (positive nonRecoverableTax); a positive schwab_amount means a
-            # reversal/refund (negative nonRecoverableTax) so it offsets a prior
-            # withholding for the same payment date.
+            # Withholding-tax related entries only ever influence the withholding
+            # fields, never grossRevenueB. A negative schwab_amount means tax was
+            # withheld; a positive one is a reversal/refund that offsets a prior
+            # withholding for the same payment date. The amount is in the
+            # statement currency, so it belongs in nonRecoverableTaxAmountOriginal
+            # — eCH's nonRecoverableTaxAmount is CHF and is filled in later, once
+            # an exchange rate and the treaty cap are known.
             # TODO: investigate whether IRS Withhold Adj and NRA Withholding need
             # distinct handling from generic withholding (file an issue if so).
             if schwab_amount and schwab_amount != 0:
@@ -707,7 +709,6 @@ class TransactionExtractor:
                     amountCurrency=currency,  # Use currency string
                     amount=schwab_amount,
                     name=f"{action}",
-                    nonRecoverableTax=tax_amount,
                     broker_label_original=action,
                     nonRecoverableTaxAmountOriginal=tax_amount,
                 )

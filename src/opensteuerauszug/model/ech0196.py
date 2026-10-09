@@ -1054,7 +1054,7 @@ class Client(BaseXmlModel):
         default=None, max_length=40, json_schema_extra={'is_attribute': True}
     )  # required in XSD
     tin: Optional[TINType] = Field(
-        default=None, max_length=40, json_schema_extra={'is_attribute': True}
+        default=None, max_length=11, json_schema_extra={'is_attribute': True}
     )  # tinType
     salutation: Optional[MrMrs] = Field(
         default=None, json_schema_extra={'is_attribute': True}
@@ -1074,8 +1074,8 @@ class Client(BaseXmlModel):
 class AccompanyingLetter(BaseXmlModel):
     # attributes
     fileName: Optional[str] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )  # MaxLength 200
+        default=None, max_length=200, json_schema_extra={'is_attribute': True}
+    )
     fileSize: Optional[int] = Field(default=None, json_schema_extra={'is_attribute': True})
     fileData: Optional[bytes] = Field(
         default=None, json_schema_extra={'is_attribute': True}
@@ -1116,25 +1116,27 @@ class BankAccountPayment(BaseXmlModel):
     amount: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
     exchangeRate: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
     grossRevenueA: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
-    grossRevenueACanton: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
+    # Not part of eCH-0196 v2.2 (bankAccountPaymentType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    grossRevenueACanton: Optional[Decimal] = Field(default=None, exclude=True)
     grossRevenueB: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
-    grossRevenueBCanton: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
+    # Not part of eCH-0196 v2.2 (bankAccountPaymentType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    grossRevenueBCanton: Optional[Decimal] = Field(default=None, exclude=True)
     withHoldingTaxClaim: Optional[Decimal] = Field(
         default=None, json_schema_extra={'is_attribute': True}
     )
-    lumpSumTaxCredit: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
-    nonRecoverableTax: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
-    bankingExpenses: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
+    # Not part of eCH-0196 v2.2 (bankAccountPaymentType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    lumpSumTaxCredit: Optional[Decimal] = Field(default=None, exclude=True)
+    # Not part of eCH-0196 v2.2 (bankAccountPaymentType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    bankingExpenses: Optional[Decimal] = Field(default=None, exclude=True)
+    # Marks a negative row as tax withheld rather than interest paid. Never
+    # serialized; downstream steps must not turn it into deductible debt
+    # interest. eCH-0196 has no DA-1 fields on a bank account payment, so
+    # foreign withholding on interest can only be carried as evidence.
+    is_withholding_tax: bool = Field(default=False, exclude=True)
 
     model_config = {
         "json_schema_extra": {'tag_name': 'payment', 'tag_namespace': NS_MAP['eCH-0196']}
@@ -1153,7 +1155,9 @@ class BankAccount(BaseXmlModel):
     )
 
     # Attributes from schema
-    iban: Optional[str] = Field(default=None, json_schema_extra={'is_attribute': True})
+    iban: Optional[str] = Field(
+        default=None, max_length=30, json_schema_extra={'is_attribute': True}
+    )
     bankAccountNumber: Optional[BankAccountNumber] = Field(
         default=None, min_length=1, max_length=32, json_schema_extra={'is_attribute': True}
     )
@@ -1172,15 +1176,15 @@ class BankAccount(BaseXmlModel):
     totalGrossRevenueA: Optional[Decimal] = Field(
         default=None, json_schema_extra={'is_attribute': True}
     )
-    totalGrossRevenueACanton: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
+    # Not part of eCH-0196 v2.2 (bankAccountType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    totalGrossRevenueACanton: Optional[Decimal] = Field(default=None, exclude=True)
     totalGrossRevenueB: Optional[Decimal] = Field(
         default=None, json_schema_extra={'is_attribute': True}
     )
-    totalGrossRevenueBCanton: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
+    # Not part of eCH-0196 v2.2 (bankAccountType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    totalGrossRevenueBCanton: Optional[Decimal] = Field(default=None, exclude=True)
     totalWithHoldingTaxClaim: Optional[Decimal] = Field(
         default=None, json_schema_extra={'is_attribute': True}
     )  # required in XSD
@@ -1250,9 +1254,9 @@ class LiabilityAccountPayment(BaseXmlModel):
     amount: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
     exchangeRate: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
     grossRevenueB: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
-    grossRevenueBCanton: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
+    # Not part of eCH-0196 v2.2 (liabilityAccountPaymentType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    grossRevenueBCanton: Optional[Decimal] = Field(default=None, exclude=True)
 
     model_config = {
         "json_schema_extra": {'tag_name': 'payment', 'tag_namespace': NS_MAP['eCH-0196']}
@@ -1271,7 +1275,9 @@ class LiabilityAccount(BaseXmlModel):
     )
 
     # Attributes from schema
-    iban: Optional[str] = Field(default=None, json_schema_extra={'is_attribute': True})
+    iban: Optional[str] = Field(
+        default=None, max_length=30, json_schema_extra={'is_attribute': True}
+    )
     bankAccountNumber: Optional[BankAccountNumber] = Field(
         default=None, min_length=1, max_length=32, json_schema_extra={'is_attribute': True}
     )
@@ -1329,12 +1335,14 @@ class Expense(BaseXmlModel):
     name: Optional[str] = Field(
         default=None, max_length=200, json_schema_extra={'is_attribute': True}
     )  # Required in XSD
-    iban: Optional[str] = Field(default=None, json_schema_extra={'is_attribute': True})
+    iban: Optional[str] = Field(
+        default=None, max_length=30, json_schema_extra={'is_attribute': True}
+    )
     bankAccountNumber: Optional[BankAccountNumber] = Field(
         default=None, min_length=1, max_length=32, json_schema_extra={'is_attribute': True}
     )
     depotNumber: Optional[DepotNumber] = Field(
-        default=None, max_length=40, json_schema_extra={'is_attribute': True}
+        default=None, max_length=32, json_schema_extra={'is_attribute': True}
     )
     amountCurrency: Optional[CurrencyId] = Field(
         default=None, pattern=r"[A-Z]{3}", json_schema_extra={'is_attribute': True}
@@ -1426,10 +1434,12 @@ class SecurityPurchaseDisposition(BaseXmlModel):
     quantity: Decimal = Field(..., json_schema_extra={'is_attribute': True})
 
     # Optional attributes
-    amountCurrency: Optional[CurrencyId] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
-    amount: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
+    # Not part of eCH-0196 v2.2 (securityPurchaseDispositionType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    amountCurrency: Optional[CurrencyId] = Field(default=None, exclude=True)
+    # Not part of eCH-0196 v2.2 (securityPurchaseDispositionType); kept as internal-only state so the
+    # serialized XML stays schema-valid. See tests/model/test_xsd_attribute_conformance.py.
+    amount: Optional[Decimal] = Field(default=None, exclude=True)
     exchangeRate: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
     value: Optional[Decimal] = Field(default=None, json_schema_extra={'is_attribute': True})
 
@@ -1490,9 +1500,6 @@ class SecurityPayment(BaseXmlModel):
     nonRecoverableTaxAmount: Optional[Decimal] = Field(
         default=None, json_schema_extra={'is_attribute': True}
     )
-    nonRecoverableTax: Optional[Decimal] = Field(
-        default=None, json_schema_extra={'is_attribute': True}
-    )
     additionalWithHoldingTaxUSA: Optional[Decimal] = Field(
         default=None, json_schema_extra={'is_attribute': True}
     )
@@ -1506,7 +1513,9 @@ class SecurityPayment(BaseXmlModel):
     retrocession: Optional[bool] = Field(default=None, json_schema_extra={'is_attribute': True})
     undefined: Optional[bool] = Field(default=None, json_schema_extra={'is_attribute': True})
     kursliste: Optional[bool] = Field(default=None, json_schema_extra={'is_attribute': True})
-    sign: Optional[str] = Field(default=None, json_schema_extra={'is_attribute': True})
+    sign: Optional[str] = Field(
+        default=None, max_length=4, json_schema_extra={'is_attribute': True}
+    )
 
     # Internal evidence metadata (never serialized to XML).
     # Preserve original broker text only when needed for reconciliation output.
@@ -1671,7 +1680,7 @@ class Depot(BaseXmlModel):
     )
     # attributes
     depotNumber: Optional[DepotNumber] = Field(
-        default=None, max_length=40, json_schema_extra={'is_attribute': True}
+        default=None, max_length=32, json_schema_extra={'is_attribute': True}
     )  # depotNumberType, required
 
     model_config = {
@@ -1881,6 +1890,12 @@ class TaxStatementBase(BaseXmlModel):
 
 # Final root model including the minorVersion attribute
 class TaxStatement(TaxStatementBase):
+    # Whether the broker export carried withholding tax records at all. False
+    # means it demonstrably did not, which is different from the broker having
+    # withheld nothing: downstream steps must not read the absence as a zero.
+    # None means unknown. Never serialized.
+    broker_reports_withholding_tax: Optional[bool] = Field(default=None, exclude=True)
+
     # Attribute specific to the root 'taxStatement' element
     minorVersion: Optional[int] = Field(
         ..., json_schema_extra={'is_attribute': True}

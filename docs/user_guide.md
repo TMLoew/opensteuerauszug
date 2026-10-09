@@ -33,6 +33,10 @@ also works for one-off commands.
 
 You can replace `ibkr` with `schwab`, `fidelity`, or `degiro` depending on your source data.
 
+If you hold short positions (written options, short stock), see
+[Short Positions](short_positions.md) — they need `--allow-short-positions` and
+their Swiss treatment is not settled.
+
 Prefer not to install anything? Download the standalone web app (a single
 HTML file that runs entirely in your browser) and follow the on-screen
 wizard instead — see the [web app guide](webapp.md).
@@ -92,6 +96,11 @@ Using OpenSteuerAuszug to generate your Steuerauszug generally involves the foll
 5.  **Import into the Tax Software**
 
     * Your Tax software will have the ability to upload e-Steuerauszug instead of adding adding manual securities.
+    * The generated PDF carries the eCH-0196 XML twice: as the PDF417 barcode
+      sheets at the end, and as a file attached to the PDF (named after the
+      statement id). If your tax software cannot read the barcodes, point it at
+      the attachment, or extract it with `--xml-output` and upload the XML
+      directly.
     * Remove any manual entries you may have used in previous years.
     * **Recalculate the tax information using the tax software**. Most tax software offers the ability to recompute tax values based on the latest Kursliste, accept that option.
 

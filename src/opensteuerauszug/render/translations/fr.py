@@ -25,6 +25,7 @@ TRANSLATIONS = {
     "values_with_da1_usa": "Valeurs avec l'imputation d'impôts étrangers prélevés à la source / retenue suppl. d'impôt USA",
     "liabilities": "Dettes",
     "liabilities_title": "Dettes",
+    "costs_title": "\u00c9tat des frais",
     "reconciliation_kursliste_broker": "Rapprochement Kursliste / paiements du courtier",
     "tax_statement_in_chf": "Relevé fiscal en CHF",
     # === BARCODE PAGE ===

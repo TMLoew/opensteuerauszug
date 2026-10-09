@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from opensteuerauszug.model.critical_warning import CriticalWarningCategory
+from opensteuerauszug.core.exchange_rate_provider import ExchangeRateProvider
 from opensteuerauszug.model.ech0196 import (
     PaymentTypeOriginal,
     Security,
@@ -37,6 +38,7 @@ class _KurslisteAgg:
     dividend_chf: Decimal = Decimal("0")
     withholding_chf: Decimal = Decimal("0")
     exchange_rate: Optional[Decimal] = None
+    currency: Optional[str] = None
     noncash: bool = False
     allows_broker_above_kursliste: bool = False
     has_capped_payment: bool = False
@@ -79,10 +81,25 @@ class PaymentReconciliationCalculator:
         tolerance_chf: Decimal = Decimal("0.05"),
         tolerance_frac: Decimal = Decimal("0.001"),
         allow_above_treaty_withholding: bool = False,
+        exchange_rate_provider: Optional["ExchangeRateProvider"] = None,
     ):
         self.tolerance_chf = tolerance_chf
         self.tolerance_frac = tolerance_frac
         self.allow_above_treaty_withholding = allow_above_treaty_withholding
+        self.exchange_rate_provider = exchange_rate_provider
+
+    def _to_chf(self, amount: Decimal, currency: Optional[str], on: date) -> Optional[Decimal]:
+        """Convert *amount* using the rate for its own currency, or None."""
+        if currency is None:
+            return None
+        if currency == "CHF":
+            return amount
+        if self.exchange_rate_provider is None:
+            return None
+        try:
+            return amount * self.exchange_rate_provider.get_exchange_rate(currency, on)
+        except (ValueError, KeyError):
+            return None
 
     def calculate(self, tax_statement: TaxStatement) -> TaxStatement:
         report = PaymentReconciliationReport()
@@ -186,14 +203,39 @@ class PaymentReconciliationCalculator:
 
             broker_div_chf = None
             broker_with_chf = None
+            currency_clash: Optional[str] = None
             if kurs.exchange_rate is not None:
-                if broker.dividend_currency is not None:
+                # The Kursliste rate only converts amounts in the Kursliste's own
+                # currency. A broker that settles the same dividend in another
+                # currency — common for securities cross-listed in Hong Kong —
+                # would otherwise be compared at a wildly wrong rate and reported
+                # as a mismatch that is not one.
+                if broker.dividend_currency is not None and self._same_currency(
+                    broker.dividend_currency, kurs.currency
+                ):
                     broker_div_chf = broker.dividend * kurs.exchange_rate
+                elif broker.dividend_currency is not None:
+                    # Different currencies can still be compared — each side just
+                    # has to use its own rate. Canadian names that IBKR settles in
+                    # USD reconcile fine this way; only a currency we have no rate
+                    # for is genuinely incomparable.
+                    broker_div_chf = self._to_chf(broker.dividend, broker.dividend_currency, d)
+                    if broker_div_chf is None:
+                        currency_clash = (
+                            f"Broker settled this payment in {broker.dividend_currency} while "
+                            f"the Kursliste records it in {kurs.currency}, and no exchange rate "
+                            f"for {broker.dividend_currency} was available; the two cannot be "
+                            "compared automatically. Check the amount by hand."
+                        )
                 if broker.withholding_currency is not None:
                     if broker.withholding_currency == "CHF":
                         broker_with_chf = broker.withholding
-                    else:
+                    elif self._same_currency(broker.withholding_currency, kurs.currency):
                         broker_with_chf = broker.withholding * kurs.exchange_rate
+                    else:
+                        broker_with_chf = self._to_chf(
+                            broker.withholding, broker.withholding_currency, d
+                        )
 
             matched = False
             status = "mismatch"
@@ -237,7 +279,9 @@ class PaymentReconciliationCalculator:
                         or not security_has_sensitive_overwithholding
                     ),
                 )
-                if div_diff:
+                if div_diff and currency_clash:
+                    div_note = currency_clash
+                elif div_diff:
                     div_note = f'Broker dividend differs from Kursliste value beyond tolerance. delta={div_diff} CHF.'
                 if w_diff:
                     w_note = f'Broker withholding differs from Kursliste value beyond tolerance. delta={w_diff} CHF.'
@@ -299,6 +343,18 @@ class PaymentReconciliationCalculator:
             )
 
         return rows
+
+    @staticmethod
+    def _same_currency(broker_currency: Optional[str], kursliste_currency: Optional[str]) -> bool:
+        """Whether the Kursliste exchange rate may be applied to a broker amount.
+
+        An unknown Kursliste currency is treated as compatible so that the
+        historic behaviour is kept for statements that carry no currency on the
+        Kursliste payment.
+        """
+        if kursliste_currency is None or broker_currency is None:
+            return True
+        return broker_currency == kursliste_currency
 
     # Return Decimal('0') if there is no mismatch, otherwise the CHF delta.
     def _component_mismatches(
@@ -362,6 +418,7 @@ class PaymentReconciliationCalculator:
         )
         if agg.exchange_rate is None and payment.exchangeRate is not None:
             agg.exchange_rate = payment.exchangeRate
+            agg.currency = payment.amountCurrency
         payment_type = payment.payment_type_original
         if payment_type is not None and payment_type != PaymentTypeOriginal.STANDARD:
             agg.noncash = True

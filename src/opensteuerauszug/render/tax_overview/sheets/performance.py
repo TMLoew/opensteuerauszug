@@ -22,7 +22,7 @@ from openpyxl.chart.label import DataLabelList
 from openpyxl.workbook import Workbook
 
 from ..data import TaxOverviewData
-from ..design import PALETTE, StyleName
+from ..design import StyleName
 from ._common import apply_column_widths, freeze_header, write_header_row
 
 SHEET_NAME = "Performance"

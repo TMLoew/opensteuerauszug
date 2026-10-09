@@ -25,6 +25,7 @@ TRANSLATIONS = {
     'values_with_da1_usa': 'Werte mit Anrechnung ausländischer Quellensteuer / zusätzlicher Steuerrückbehalt USA',
     'liabilities': 'Schulden',
     'liabilities_title': 'Schulden',
+    'costs_title': 'Spesenverzeichnis',
     'reconciliation_kursliste_broker': 'Abgleich Kursliste / Brokerzahlungen',
     'tax_statement_in_chf': 'Steuerauszug in CHF',
     # === BARCODE PAGE ===

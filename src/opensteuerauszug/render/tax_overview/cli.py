@@ -67,6 +67,27 @@ def tax_overview_command(
         "Overrides the config's general.canton; when neither is set, the "
         "canton from the importer data applies.",
     ),
+    kursliste_dir: Optional[Path] = typer.Option(
+        None,
+        "--kursliste-dir",
+        help="Directory containing the Kursliste for the year. Defaults to "
+        "'data/kursliste' in CWD or the XDG data home, as for `process`.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to the configuration TOML file, as for `process`.",
+    ),
+    allow_short_positions: bool = typer.Option(
+        False,
+        "--allow-short-positions",
+        help=(
+            "Accept securities with a negative balance (written options, short stock) "
+            "instead of stopping. How short positions must be declared is not settled "
+            "in Swiss practice; read docs/short_positions.md before using this."
+        ),
+    ),
     online_sectors: bool = typer.Option(
         False,
         "--online-sectors",
@@ -101,6 +122,9 @@ def tax_overview_command(
         prior_year_input_path=prior_year_input,
         canton=canton.strip().upper() if canton else None,
         online_sectors=online_sectors,
+        allow_short_positions=allow_short_positions,
+        kursliste_dir=kursliste_dir,
+        config_file=config_file,
     )
     produced = write_tax_overview(request)
     for path in produced:

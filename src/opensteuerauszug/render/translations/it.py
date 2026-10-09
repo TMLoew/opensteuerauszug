@@ -25,6 +25,7 @@ TRANSLATIONS = {
     "values_with_da1_usa": "Valori con computo delle imposte estere trattenute alla fonte / trattenuta supplementare USA",
     "liabilities": "Debiti",
     "liabilities_title": "Debiti",
+    "costs_title": "Elenco delle spese",
     "reconciliation_kursliste_broker": "Confronto Kursliste / pagamenti broker",
     "tax_statement_in_chf": "Dichiarazione fiscale in CHF",
     # === BARCODE PAGE ===

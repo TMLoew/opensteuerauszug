@@ -27,7 +27,7 @@ def create_test_security(
                 quotationType="PIECE",
                 quantity=Decimal("10"),
                 amountCurrency="CHF",
-                nonRecoverableTax=Decimal("15.00") if with_nonrecoverable_tax else None,
+                nonRecoverableTaxAmount=Decimal("15.00") if with_nonrecoverable_tax else None,
                 additionalWithHoldingTaxUSA=Decimal("15.00") if with_usa_withholding else None,
                 grossRevenueA=Decimal("100.00") if with_revenue_a else None,
                 grossRevenueB=Decimal("100.00") if with_revenue_b else None,

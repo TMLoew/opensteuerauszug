@@ -81,6 +81,15 @@ NON_TAXABLE_SIGNS: Set[str] = {
 }
 
 
+class UnsupportedKurslistePayment(NotImplementedError):
+    """A Kursliste payment this calculator cannot turn into a tax statement row.
+
+    Raised per security so that callers with another source of truth — fill-in
+    mode, which has the broker's own figures — can fall back for that one
+    security instead of losing the whole statement.
+    """
+
+
 class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
     """
     Calculator that uses a Kursliste (official tax value list) to determine
@@ -113,6 +122,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         self._missing_kursliste_entries = []
         self._stock_split_warnings: List[dict] = []
         self._previous_year_exdate_warnings = []
+        self._unsupported_payment_warnings: List[dict] = []
         self._all_securities: List[Security] = []
 
     def _translate(self, key: str) -> str:
@@ -122,6 +132,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         self._missing_kursliste_entries = []
         self._stock_split_warnings = []
         self._previous_year_exdate_warnings = []
+        self._unsupported_payment_warnings = []
         # Collect all securities across all depots so that cross-security
         # split validation (valorNumberNew) can look up the target security.
         self._all_securities = []
@@ -130,16 +141,20 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                 self._all_securities.extend(depot.security)
         result = super().calculate(tax_statement)
         if self._missing_kursliste_entries:
+            securities_by_identifier = {
+                self._security_identifier(s): s for s in self._all_securities
+            }
             logger.warning("Missing Kursliste entries for securities:")
             for entry in self._missing_kursliste_entries:
                 logger.warning("  - %s", entry)
+                dropped = self._describe_dropped_broker_income(securities_by_identifier.get(entry))
                 result.critical_warnings.append(
                     CriticalWarning(
                         category=CriticalWarningCategory.MISSING_KURSLISTE,
                         message=(
                             f"Security {entry} was not found in the Kursliste. "
                             "Tax values and income for this security may be "
-                            "incorrect or missing."
+                            "incorrect or missing." + dropped
                         ),
                         source="KurslisteTaxValueCalculator",
                         identifier=entry,
@@ -149,6 +164,15 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
             result.critical_warnings.append(
                 CriticalWarning(
                     category=CriticalWarningCategory.STOCK_SPLIT_MISMATCH,
+                    message=warning_info["message"],
+                    source="KurslisteTaxValueCalculator",
+                    identifier=warning_info["identifier"],
+                )
+            )
+        for warning_info in self._unsupported_payment_warnings:
+            result.critical_warnings.append(
+                CriticalWarning(
+                    category=CriticalWarningCategory.MISSING_KURSLISTE,
                     message=warning_info["message"],
                     source="KurslisteTaxValueCalculator",
                     identifier=warning_info["identifier"],
@@ -165,6 +189,49 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                 )
             )
         return result
+
+    @staticmethod
+    def _security_identifier(security: Security) -> str:
+        return (
+            security.isin
+            or (f"Valor {security.valorNumber}" if security.valorNumber else None)
+            or security.securityName
+        )
+
+    @staticmethod
+    def _describe_dropped_broker_income(security: Optional[Security]) -> str:
+        """Spell out the broker income this calculator is about to discard.
+
+        Without a Kursliste entry the payment list is replaced by an empty one,
+        so any dividend or interest the broker reported disappears from the
+        statement. Naming the amounts lets the reader add them by hand (or
+        re-run with ``--tax-calculation-level fillin``) instead of silently
+        under-declaring.
+        """
+        if security is None or not security.broker_payments:
+            return ""
+        if security.payment:
+            # Something is still reported as income for this security — either
+            # Kursliste rows or, in fill-in mode, the broker's own. Nothing was
+            # dropped, so there is nothing to list here.
+            return ""
+        totals: dict[str, Decimal] = {}
+        for payment in security.broker_payments:
+            if payment.nonRecoverableTaxAmountOriginal is not None:
+                continue
+            amount = payment.amount
+            if amount is None or amount <= Decimal("0"):
+                continue
+            currency = payment.amountCurrency or "?"
+            totals[currency] = totals.get(currency, Decimal("0")) + amount
+        if not totals:
+            return ""
+        rendered = ", ".join(f"{amount:.2f} {currency}" for currency, amount in totals.items())
+        return (
+            f" The broker reported {rendered} of income for it which is NOT "
+            "included in this statement; declare it manually or re-run with "
+            "--tax-calculation-level fillin."
+        )
 
     def _handle_Security(self, security: Security, path_prefix: str) -> None:
         if security.securityCategory == "BOND":
@@ -218,11 +285,7 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                     valor_int = kl_sec.valorNumber
                 self._set_field_value(security, "valorNumber", valor_int, path_prefix)
         else:
-            ident = (
-                security.isin
-                or (f"Valor {security.valorNumber}" if security.valorNumber else None)
-                or security.securityName
-            )
+            ident = self._security_identifier(security)
 
             # Check if this is a rights issue or zero-balance option that we should ignore if not found
             is_rights = security.is_rights_issue
@@ -547,6 +610,31 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
             )
 
     def computePayments(self, security: Security, path_prefix: str) -> None:
+        """Compute payments for a security, surviving ones we cannot express.
+
+        A single security whose Kursliste entry we cannot turn into statement
+        rows must not cost the whole statement; it costs that security's income,
+        which is reported.
+        """
+        try:
+            self._compute_kursliste_payments(security, path_prefix)
+        except UnsupportedKurslistePayment as exc:
+            self._handle_unsupported_kursliste_payment(security, exc, path_prefix)
+
+    def _handle_unsupported_kursliste_payment(
+        self, security: Security, exc: "UnsupportedKurslistePayment", path_prefix: str
+    ) -> None:
+        """Drop the income we cannot express and say so on the statement."""
+        logger.warning("%s No income is reported for this security.", exc)
+        self._unsupported_payment_warnings.append(
+            {
+                "message": f"{exc} No income is reported for it in this statement.",
+                "identifier": self._security_identifier(security),
+            }
+        )
+        self.setKurslistePayments(security, [], path_prefix)
+
+    def _compute_kursliste_payments(self, security: Security, path_prefix: str) -> None:
         """Compute payments for a security using the Kursliste."""
         if not self.kursliste_manager:
             raise RuntimeError("kursliste_manager is required for Kursliste payments")
@@ -857,8 +945,13 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                         sec_payment.lumpSumTaxCredit = True
 
             if effective_sign == "(V)":
-                raise NotImplementedError(
-                    f"DA-1 for sign='(V)' not implemented for {security.isin or security.securityName} on {pay.paymentDate}"
+                raise UnsupportedKurslistePayment(
+                    f"The Kursliste marks the payment on {pay.paymentDate} for "
+                    f"{security.isin or security.securityName} with sign '(V)' "
+                    "(distribution in the form of shares). Its DA-1 treatment is not "
+                    "implemented. Re-run with --tax-calculation-level fillin to fall "
+                    "back to the income your broker actually reported for this "
+                    "security, and check it by hand."
                 )
 
             result.append(sec_payment)

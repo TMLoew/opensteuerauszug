@@ -164,7 +164,14 @@ class ConfigManager:
         try:
             settings = GeneralSettings(**settings_dict)
         except Exception as e:
-            print(f"Warning: Error loading general configuration settings: {e}")
+            # Returning None here drops *every* general setting, including the
+            # canton, which then fails much later with an unrelated-looking
+            # error. Make the cause impossible to miss.
+            print(
+                "ERROR: the [general] configuration section is invalid and is being "
+                f"ignored in full (canton, language, ...): {e}"
+            )
+            logger.error("Invalid [general] configuration section, ignoring it: %s", e)
             return None
 
         self._print_loaded_settings("general", settings_dict)

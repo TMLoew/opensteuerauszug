@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 from decimal import Decimal
 
-import pytest
 from pypdf import PdfReader
 
 from opensteuerauszug.render.tax_overview import (

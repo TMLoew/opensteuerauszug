@@ -584,7 +584,7 @@ def test_security_payment_quantity_is_none_before_cleanup(sample_ibkr_settings):
                 assert (
                     payment.quantity is None
                 ), f"Tax payment quantity for {payment.name} should be None before cleanup"
-                assert payment.nonRecoverableTax is None
+                assert payment.nonRecoverableTaxAmount is None
                 assert payment.nonRecoverableTaxAmountOriginal == Decimal("1.85")
                 assert payment.broker_label_original == "Withholding Tax"
             else:
@@ -699,7 +699,12 @@ def test_transfer_to_stock(sample_ibkr_settings):
             os.remove(xml_file_path)
 
 
-def test_transfer_quantity_sign_mismatch(sample_ibkr_settings):
+def test_transfer_quantity_wins_over_a_contradicting_direction(sample_ibkr_settings, caplog):
+    """IBKR reports short-opening transfers with a direction that contradicts the
+    quantity. The quantity moves the position, so it is authoritative; the
+    importer reports the mismatch and carries on rather than refusing the export.
+    Whether the resulting balance may be negative is decided in CleanupCalculator.
+    """
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
 
@@ -714,11 +719,16 @@ def test_transfer_quantity_sign_mismatch(sample_ibkr_settings):
         xml_file_path = tmp_file.name
 
     try:
-        with pytest.raises(ValueError):
-            importer.import_files([xml_file_path])
+        with caplog.at_level("WARNING"):
+            statement = importer.import_files([xml_file_path])
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
+
+    assert "Transfer direction OUT but quantity 10" in caplog.text
+    security = statement.listOfSecurities.depot[0].security[0]
+    mutations = [s for s in security.stock if s.mutation]
+    assert [m.quantity for m in mutations] == [Decimal("10")]
 
 
 def test_transfer_with_open_position_no_trades(sample_ibkr_settings):
@@ -979,7 +989,7 @@ def test_open_position_balance_date_is_day_after_period_end(sample_ibkr_settings
 
 
 def test_cash_transaction_security_interest_assert(sample_ibkr_settings):
-    """CashTransaction with security ID and interest type should raise AssertionError."""
+    """Broker interest booked against a non-bond security must be rejected."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
 
@@ -994,7 +1004,7 @@ def test_cash_transaction_security_interest_assert(sample_ibkr_settings):
         xml_file_path = tmp_file.name
 
     try:
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="report broker interest as securities income"):
             importer.import_files([xml_file_path])
     finally:
         if os.path.exists(xml_file_path):
@@ -2100,7 +2110,7 @@ def test_withholding_tax_cash_transactions_are_mapped_to_security_tax_fields(sam
         assert ireen.payment[0].broker_label_original == "Withholding Tax"
         assert ireen.payment[0].amount == Decimal("-1234.56")
         assert ireen.payment[0].withHoldingTaxClaim == Decimal("1234.56")
-        assert ireen.payment[0].nonRecoverableTax is None
+        assert ireen.payment[0].nonRecoverableTaxAmount is None
         assert ireen.payment[0].nonRecoverableTaxAmountOriginal is None
 
         assert len(asml.payment) == 1
@@ -2109,7 +2119,7 @@ def test_withholding_tax_cash_transactions_are_mapped_to_security_tax_fields(sam
         )
         assert asml.payment[0].broker_label_original == "Withholding Tax"
         assert asml.payment[0].amount == Decimal("-1.13")
-        assert asml.payment[0].nonRecoverableTax is None
+        assert asml.payment[0].nonRecoverableTaxAmount is None
         assert asml.payment[0].nonRecoverableTaxAmountOriginal == Decimal("1.13")
     finally:
         if os.path.exists(xml_file_path):
@@ -2437,18 +2447,22 @@ def test_broker_interest_paid_debit_creates_bank_payment(caplog):
         assert eur_debit_payment is not None, "EUR DEBIT INT FOR should create a bank payment"
         assert eur_debit_payment.amount == Decimal("-1.50")
 
-        # Check that CHF CREDIT INT FOR logs a warning and does NOT create a bank payment
+        # Negative credit interest is a cost, not debt interest: it belongs in the
+        # expenses register rather than as a bank account payment.
         chf_account = next((ba for ba in bank_accounts if ba.bankAccountCurrency == "CHF"), None)
         assert chf_account is not None, "CHF bank account should exist"
 
         chf_payment = next((p for p in chf_account.payment if "CHF CREDIT INT FOR" in p.name), None)
         assert chf_payment is None, "CHF CREDIT INT FOR should NOT create a bank payment"
 
-        # Check that a warning was logged for the CHF transaction
-        assert any(
-            "CHF CREDIT INT FOR AUG-2025" in record.message and "is not handled" in record.message
-            for record in caplog.records
-        ), "Warning should be logged for CHF CREDIT INT FOR"
+        assert tax_statement.listOfExpenses is not None
+        chf_expense = next(
+            e
+            for e in tax_statement.listOfExpenses.expense
+            if "CHF CREDIT INT FOR AUG-2025" in e.name
+        )
+        # eCH expense type 29 = Negativzinsen (im Privatvermoegen).
+        assert chf_expense.expenseType == "29"
 
     finally:
         if os.path.exists(xml_file_path):

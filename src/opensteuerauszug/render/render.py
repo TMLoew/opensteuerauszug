@@ -34,7 +34,12 @@ from barcode import Code128
 assert ImageWriter is not None  # Pillow is a declared dependency
 import logging
 
-from opensteuerauszug.model.ech0196 import TaxStatement, Security, CountryIdISO2Type
+from opensteuerauszug.model.ech0196 import (
+    EXPENSE_TYPE_DESCRIPTIONS,
+    CountryIdISO2Type,
+    Security,
+    TaxStatement,
+)
 from .onedee import OneDeeBarCode
 from opensteuerauszug.core.organisation import compute_org_nr
 from opensteuerauszug.core.security import determine_security_type, SecurityType
@@ -1139,6 +1144,25 @@ def create_liabilities_table(tax_statement, styles, usable_width):
     return liabilities_table
 
 
+def _costs_rows(tax_statement: TaxStatement) -> list:
+    """Rows for the costs table, straight from the expenses register.
+
+    No deductible amount is shown: eCH leaves ``expensesDeductible`` optional
+    and nothing upstream asserts deductibility, so the table reports what was
+    charged and the footnote says who decides.
+    """
+    if not tax_statement.listOfExpenses or not tax_statement.listOfExpenses.expense:
+        return []
+    return [
+        {
+            "description": expense.name or "",
+            "type": EXPENSE_TYPE_DESCRIPTIONS.get(expense.expenseType or "", ""),
+            "value_chf": expense.expenses or Decimal(0),
+        }
+        for expense in tax_statement.listOfExpenses.expense
+    ]
+
+
 # --- Costs Table Function ---
 def create_costs_table(data, styles, usable_width):
     """Creates a table displaying bank costs information.
@@ -1180,7 +1204,7 @@ def create_costs_table(data, styles, usable_width):
     table_data.append(
         [
             Paragraph(t('total_paid_bank_fees'), bold_left),
-            Paragraph(val_left),
+            Paragraph('', val_left),
             Paragraph(format_currency_2dp(total_costs), bold_right),
         ]
     )
@@ -2778,6 +2802,27 @@ def render_tax_statement(
         story.append(securities_table_da1)
         story.append(Spacer(1, 0.5 * cm))
 
+    # --- Costs Section ---
+    costs_table = create_costs_table(
+        {
+            "costs": _costs_rows(tax_statement),
+            "summary": {
+                "period_end_date": (
+                    tax_statement.periodTo.strftime("%d.%m.%Y")
+                    if tax_statement.periodTo
+                    else "31.12"
+                )
+            },
+        },
+        styles,
+        usable_width,
+    )
+    if costs_table:
+        story.append(PageBreak())
+        story.append(Paragraph(t('costs_title'), title_style))
+        story.append(costs_table)
+        story.append(Spacer(1, 0.5 * cm))
+
     # --- Liabilities Section ---
     liabilities_table = create_liabilities_table(tax_statement, styles, usable_width)
     if liabilities_table:
@@ -2843,11 +2888,37 @@ def render_tax_statement(
     pdf_data = buffer.getvalue()
     buffer.close()
 
+    pdf_data = _embed_tax_statement_xml(pdf_data, tax_statement)
+
     # Write to file
     with open(output_path, 'wb') as f:
         f.write(pdf_data)
 
     return Path(output_path)
+
+
+def _embed_tax_statement_xml(pdf_data: bytes, tax_statement: TaxStatement) -> bytes:
+    """Attach the eCH-0196 XML to the PDF as an embedded file.
+
+    The eCH-0196 guidance names two ways for the statement to reach the
+    assessment process: "die XML-Datei als Anlage im PDF oder als Barcode".
+    The barcode sheets are always produced, but an attachment survives
+    printing/re-compression and is what tax software reads when it offers to
+    import a statement directly, so ship both.
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    try:
+        xml_bytes = tax_statement.to_xml_bytes()
+        reader = PdfReader(io.BytesIO(pdf_data))
+        writer = PdfWriter(clone_from=reader)
+        writer.add_attachment(f"{tax_statement.id or 'taxstatement'}.xml", xml_bytes)
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue()
+    except Exception as e:  # pragma: no cover - never fail the render over this
+        logger.warning("Could not embed the eCH-0196 XML into the PDF: %s", e)
+        return pdf_data
 
 
 # --- Main function for testing ---

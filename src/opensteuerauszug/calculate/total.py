@@ -361,6 +361,18 @@ class TotalCalculator(BaseCalculator):
                 "listOfLiabilities",
             )
 
+        # 4. Process Expenses. Only the total of the costs themselves is
+        # computed; the deductible totals stay empty because no deductibility
+        # is asserted anywhere upstream.
+        if tax_statement.listOfExpenses and tax_statement.listOfExpenses.expense:
+            total_expenses = sum(
+                (e.expenses for e in tax_statement.listOfExpenses.expense if e.expenses),
+                Decimal('0'),
+            )
+            self._round_and_set_field(
+                tax_statement.listOfExpenses, 'totalExpenses', total_expenses, "listOfExpenses"
+            )
+
         # Set final global totals (already rounded when accumulated from list subtotals)
         self._round_and_set_field(tax_statement, 'totalTaxValue', self.total_tax_value, "")
         self._round_and_set_field(

@@ -1,9 +1,23 @@
 # 1. General Settings
 [general]
 canton = "ZG" # Required if importer doesn't provide canton. Comment out to use importer data (e.g., IBKR flex report).
-full_name = "Test User Name"
+full_name = "Test User Name" # Only fills a name the importer left blank.
+# Authoritative over whatever the broker export says. Use these when the broker
+# spells your name differently from your tax return (two statements for one
+# taxpayer should not reach the assessor under two spellings), or when
+# full_name cannot express it: full_name splits on the first space, so
+# "Hans Peter Müller" would give the surname "Peter Müller".
+# first_name = "Hans Peter"
+# last_name = "Müller"
 language = "de" # Default language
 experimental_importers = false # Set to true to enable experimental importers (e.g., Fidelity)
+
+# Calculation behaviour
+[calculate]
+# Accept securities with a negative balance (written options, short stock).
+# Off by default: the Swiss treatment is unsettled and a negative balance is
+# also how an import bug shows up. See docs/short_positions.md.
+# allow_short_positions = true
 
 [general.processing_flags]
 detect_foreign_income = true

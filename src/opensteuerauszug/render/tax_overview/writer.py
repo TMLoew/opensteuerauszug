@@ -47,6 +47,13 @@ class TaxOverviewRequest:
     # Opt-in yfinance sector lookup for the Performance tab. Off by default:
     # no network calls unless explicitly requested.
     online_sectors: bool = False
+    # Accept securities with a negative balance (written options, short stock),
+    # matching the `process` command. See docs/short_positions.md.
+    allow_short_positions: bool = False
+    # Same overrides the `process` command accepts, so a working invocation of
+    # one does not have to be rediscovered for the other.
+    kursliste_dir: Optional[Path] = None
+    config_file: Optional[Path] = None
 
 
 def compute_report_hash(request: TaxOverviewRequest) -> str:
@@ -89,6 +96,9 @@ def write_tax_overview(request: TaxOverviewRequest) -> List[Path]:
         prior_year_input_path=request.prior_year_input_path,
         canton=request.canton,
         online_sectors=request.online_sectors,
+        allow_short_positions=request.allow_short_positions,
+        kursliste_dir=request.kursliste_dir,
+        config_file=request.config_file,
     )
     data = result.data
 

@@ -12,7 +12,30 @@ class GeneralSettings(BaseModel):
         default=None,
         description="Your canton (e.g., 'ZH', 'BE'). If not provided, will be extracted from importer data (e.g., IBKR flex report).",
     )
-    full_name: str = Field(description="Your full name for tax documents.")
+    full_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Your full name for tax documents. Optional: when omitted the name "
+            "from the broker export is used. Keeping it optional means a config "
+            "that only sets e.g. `canton` still loads instead of being discarded "
+            "wholesale. Only fills in a name the importer left blank; to override "
+            "what the broker supplies, use `first_name`/`last_name`."
+        ),
+    )
+    first_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Given name(s), authoritative over whatever the broker export says. "
+            "`full_name` cannot express every name: it splits on the first space, "
+            "so 'Hans Peter Müller' would yield the surname 'Peter Müller'. "
+            "Set this and `last_name` when the split would be wrong, or when the "
+            "broker spells your name differently from your tax return."
+        ),
+    )
+    last_name: Optional[str] = Field(
+        default=None,
+        description="Surname, authoritative over the broker export. See `first_name`.",
+    )
     language: str = Field(
         default=DEFAULT_LANGUAGE,
         description="Default language for documents (e.g., 'de', 'fr', 'it').",
@@ -122,6 +145,15 @@ class CalculateSettings(BaseModel):
     tolerance: Decimal = Field(
         default=Decimal('0.05'),
         description="Tolerance (in CHF) for " "PaymentReconciliationCalculator",
+    )
+    allow_short_positions: bool = Field(
+        default=False,
+        description=(
+            "Allow securities to carry a negative balance (written options, short "
+            "stock). Off by default because the Swiss treatment of short positions "
+            "is unsettled and a negative balance is also the symptom of an import "
+            "bug. See docs/short_positions.md."
+        ),
     )
 
 

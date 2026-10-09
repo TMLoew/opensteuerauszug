@@ -638,7 +638,7 @@ class TestSchwabTransactionExtractor:
         assert len(payments) == 1  # The tax payment itself
         payment = payments[0]
         assert payment.amount == Decimal("-22.50")
-        assert payment.nonRecoverableTax == Decimal("22.50")
+        assert payment.nonRecoverableTaxAmountOriginal == Decimal("22.50")
         assert payment.grossRevenueB is None
         assert payment.name is not None
         assert payment.name == "Tax Withholding"
@@ -684,9 +684,9 @@ class TestSchwabTransactionExtractor:
         assert len(payments) == 1
         payment = payments[0]
         assert payment.amount == Decimal("5.00")
-        # Positive amount = withholding reversal, recorded as negative nonRecoverableTax.
+        # Positive amount = withholding reversal, recorded as a negative withheld amount.
         assert payment.grossRevenueB is None
-        assert payment.nonRecoverableTax == Decimal("-5.00")
+        assert payment.nonRecoverableTaxAmountOriginal == Decimal("-5.00")
         assert payment.nonRecoverableTaxAmountOriginal == Decimal("-5.00")
         assert payment.name is not None
         assert payment.name == "NRA Tax Adj"
@@ -1422,7 +1422,7 @@ class TestSchwabTransactionExtractor:
             extractor._extract_transactions_from_dict(data)
 
     def test_action_tax_reversal(self):
-        """Tax Reversal with positive amount records a negative nonRecoverableTax (offsetting prior withholding)."""
+        """Tax Reversal with positive amount records a negative withheld amount (offsetting prior withholding)."""
         extractor = create_extractor()
         data = {
             "FromDate": "01/01/2024",
@@ -1456,7 +1456,7 @@ class TestSchwabTransactionExtractor:
         payment = payments[0]
         assert payment.amount == Decimal("11.20")
         assert payment.grossRevenueB is None
-        assert payment.nonRecoverableTax == Decimal("-11.20")
+        assert payment.nonRecoverableTaxAmountOriginal == Decimal("-11.20")
         assert payment.nonRecoverableTaxAmountOriginal == Decimal("-11.20")
         assert payment.name == "Tax Reversal"
 
@@ -1768,9 +1768,9 @@ class TestSchwabTransactionExtractor:
             assert not stocks
             assert payments is not None and len(payments) == 1
             payment = payments[0]
-            assert payment.nonRecoverableTax == abs(
+            assert payment.nonRecoverableTaxAmountOriginal == abs(
                 Decimal(amount)
-            ), f"nonRecoverableTax for {action_str} should be set"
+            ), f"withheld amount for {action_str} should be set"
             assert payment.grossRevenueB is None
             assert payment.broker_label_original == action_str
 

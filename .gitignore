@@ -191,9 +191,26 @@ cython_debug/
 .pypirc
 .aider*
 
-# Ignore downloaded kursliste files
+# Personal broker exports, bank statements and working notes.
+# Real tax data carries a name, an address, account numbers and full holdings;
+# it must never be committed.
+#
+# Deny everything under /data and re-admit only the generic fixtures. Listing
+# extensions instead (/data/*.pdf and friends) silently missed subdirectories:
+# a folder of broker exports dropped into data/ was left fully trackable,
+# because those patterns only ever matched direct children. Git cannot
+# re-include a file whose parent directory is excluded, so each level that
+# needs an exception is opened explicitly.
+/data/*
+!/data/manual_prices_2023.csv
+!/data/manual_prices_2025.csv
+!/data/security_identifiers.csv
+
+# Downloaded kursliste files: keep the directory itself visible for the README.
+!/data/kursliste
 /data/kursliste/*
 !/data/kursliste/kursliste.md
+/data/overviews exported from ibkr
 
 # Compiled java files
 *.class

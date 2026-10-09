@@ -9,6 +9,7 @@ from opensteuerauszug.model.ech0196 import (
     Security,
     SecurityTaxValue,
     SecurityPayment,
+    Expense,
 )
 from opensteuerauszug.core.exchange_rate_provider import ExchangeRateProvider
 from collections import defaultdict
@@ -35,6 +36,7 @@ class MinimalTaxValueCalculator(BaseCalculator):
     _current_account_is_type_A: Optional[bool]
     _current_security_is_type_A: Optional[bool]
     _current_security_country: Optional[str]
+    _current_security_category: Optional[str]
 
     def __init__(
         self,
@@ -48,6 +50,7 @@ class MinimalTaxValueCalculator(BaseCalculator):
         self._current_account_is_type_A = None
         self._current_security_is_type_A = None
         self._current_security_country = None
+        self._current_security_category = None
         self.logger = logging.getLogger(__name__)
         self.logger.info(
             "MinimalTaxValueCalculator initialized with mode: %s and provider: %s",
@@ -93,6 +96,7 @@ class MinimalTaxValueCalculator(BaseCalculator):
         self._current_account_is_type_A = None  # Reset state at the beginning of a calculation run
         self._current_security_is_type_A = None  # Reset state
         self._current_security_country = None  # Reset state
+        self._current_security_category = None  # Reset state
         super().calculate(tax_statement)
         self.logger.info(
             "MinimalTaxValueCalculator: Finished processing. Errors: %s, Modified fields: %s",
@@ -225,10 +229,30 @@ class MinimalTaxValueCalculator(BaseCalculator):
                 # Liabilities are considered Type B for revenue purposes
                 self._set_field_value(lia_payment, "grossRevenueB", chf_amount, path_prefix)
 
+    def _handle_Expense(self, expense: "Expense", path_prefix: str) -> None:
+        """Convert a broker cost to CHF.
+
+        ``expenses`` is the CHF figure eCH-0196 expects; ``amount`` stays the
+        original-currency one. ``expensesDeductible`` is left alone — deciding
+        what is deductible is the assessing authority's job.
+        """
+        if not expense.amountCurrency or expense.referenceDate is None:
+            return
+        chf_amount, rate = self._convert_to_chf(
+            expense.amount,
+            expense.amountCurrency,
+            f"{path_prefix}.exchangeRate",
+            expense.referenceDate,
+        )
+        self._set_field_value(expense, "exchangeRate", rate, path_prefix)
+        if chf_amount is not None:
+            self._set_field_value(expense, "expenses", abs(chf_amount), path_prefix)
+
     def _handle_Security(self, security: Security, path_prefix: str) -> None:
         """Sets the type A/B context based on the security's country of taxation."""
         country_code = security.country
         self._current_security_country = country_code
+        self._current_security_category = security.securityCategory
 
         if country_code:
             if country_code == "CH":
@@ -288,6 +312,31 @@ class MinimalTaxValueCalculator(BaseCalculator):
                 f"SecurityTaxValue at {path_prefix} has a 'value' but no 'balanceCurrency'. Cannot perform currency conversion or set exchange rate accurately."
             )
 
+        self._mark_tax_value_undefined(sec_tax_value, path_prefix)
+
+    def _mark_tax_value_undefined(self, sec_tax_value: SecurityTaxValue, path_prefix: str) -> None:
+        """Flag a Steuerwert as undefined and drop the value that goes with it.
+
+        eCH-0196 is explicit that the two cannot coexist: "Falls der Steuerwert
+        undefiniert ist, dann darf keine 0 im Steuerwert angegeben werden,
+        sondern das Attribut ist in diesem Fall nicht anzugeben." A statement
+        that carries both makes the consuming software disagree with our own
+        totals, because it counts an undefined Steuerwert as zero.
+
+        ``balance`` and ``exchangeRate`` stay: they are the broker's evidence in
+        the original currency, not a Steuerwert.
+
+        In VERIFY mode we are reading somebody else's statement, where a
+        Steuerwert we cannot reproduce is normal; only the combination of both
+        attributes is reported as the inconsistency it is.
+        """
+        if self.mode == CalculationMode.VERIFY:
+            if sec_tax_value.undefined and sec_tax_value.value is not None:
+                self.errors.append(
+                    CalculationError(f"{path_prefix}.value", None, sec_tax_value.value)
+                )
+            return
+        self._set_field_value(sec_tax_value, "value", None, path_prefix)
         self._set_field_value(sec_tax_value, "undefined", True, path_prefix)
 
     def _handle_SecurityPayment(self, sec_payment: SecurityPayment, path_prefix: str) -> None:

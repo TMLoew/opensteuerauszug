@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from ...model.ech0196 import TaxStatement
-from .perf_records import PerformanceRecord, compute_performance_records
+from .perf_records import compute_performance_records
 from .data import (
     BenchmarkComparison,
     PerformancePosition,

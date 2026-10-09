@@ -23,7 +23,7 @@ def determine_security_type(security: Security) -> SecurityType:
     Determine if a security belongs to type 'A', 'B', or 'DA1'.
 
     Rules:
-    - DA1: If the security has payments with nonRecoverableTax or additionalWithHoldingTaxUSA
+    - DA1: If the security has payments with a non-recoverable tax or additionalWithHoldingTaxUSA
     - A: If the security has grossRevenueA in any payment, or if there's no revenue but the country is CH
     - B: All other cases
 
@@ -54,8 +54,9 @@ def _has_da1_payments(payments: Optional[List[SecurityPayment]]) -> bool:
 
     for payment in payments:
         # Check for non-recoverable tax
-        if (payment.nonRecoverableTax and payment.nonRecoverableTax > Decimal("0")) or (
-            payment.nonRecoverableTaxAmount and payment.nonRecoverableTaxAmount > Decimal("0")
+        if (payment.nonRecoverableTaxAmount and payment.nonRecoverableTaxAmount > Decimal("0")) or (
+            payment.nonRecoverableTaxAmountOriginal
+            and payment.nonRecoverableTaxAmountOriginal > Decimal("0")
         ):
             return True
 
@@ -92,3 +93,30 @@ def _has_any_revenue(payments: Optional[List[SecurityPayment]]) -> bool:
             return True
 
     return False
+
+
+# ISIN prefixes that are not ISO 3166-1 alpha-2 country codes. "XS" is the
+# Euroclear/Clearstream international prefix, "EU" is used for European
+# institutions, and the "XA".."XF" / "QS" / "QT" ranges are CUSIP
+# International / internally assigned numbers.  Everything else in the ISIN
+# prefix position is a real country code by construction.
+_NON_COUNTRY_ISIN_PREFIXES = ("X", "Q")
+
+
+def country_from_isin(isin: Optional[str]) -> Optional[str]:
+    """Return the issuer country encoded in *isin*, or ``None``.
+
+    The first two characters of an ISIN are the ISO 3166-1 alpha-2 code of the
+    numbering agency that assigned it, which is the best available proxy for
+    the country of a security when the broker does not report one.  Codes from
+    the reserved international ranges carry no country information and yield
+    ``None`` so the caller can fall back or warn.
+    """
+    if not isin or len(isin) < 2:
+        return None
+    prefix = str(isin)[:2].upper()
+    if not prefix.isalpha():
+        return None
+    if prefix.startswith(_NON_COUNTRY_ISIN_PREFIXES) or prefix == "EU":
+        return None
+    return prefix

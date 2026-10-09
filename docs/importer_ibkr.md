@@ -18,6 +18,59 @@ OpenSteuerAuszug processes IBKR data using [**Flex Query XML files**](https://ww
     *   **Important**: The "Custom Period" date-range option only appears in the run dialog **after** the Flex Query has been saved. The date-range settings shown while *creating* the query are for periodic automatic reports, not for on-demand runs.
     *   **Use the IBKR web interface** (desktop browser) to run the query. The mobile app may not expose the "Custom Period" option in the date-range dropdown.
 
+### Settings that silently corrupt the result if you get them wrong
+
+Two Flex Query options change the *numbers*, not just the completeness, so they
+are worth checking before anything else:
+
+1.  **Pick exactly one "Level of Detail" for Cash Transactions** — Summary or
+    Detail, not both. Each level on its own gives the correct totals. With both
+    ticked IBKR writes every dividend, interest payment and fee twice, and the
+    summary rows *aggregate* detail rows (a single `56.32 CREDIT INT` row next
+    to the `47.45 CREDIT INT` and `8.87 SYEP INTEREST` rows it is made of), so
+    the duplicates cannot be removed afterwards. OpenSteuerAuszug detects this
+    and refuses the file rather than doubling your income. Also tick the
+    **Level of Detail** field: when it is present the levels can be told apart
+    and the summary rows are used automatically.
+2.  **Tick the "Withholding Tax" cash transaction type.** Without it the export
+    has dividends but no tax deducted, so the Verrechnungssteuer claim and the
+    DA-1 credit are missing. The statement says so in a critical warning.
+
+### Cash transaction types
+
+Tick these — all are understood:
+
+| Type | Notes |
+|---|---|
+| Dividends | must be linked to a security |
+| Payment in Lieu of Dividends | must be linked to a security; arises from securities lending and short positions |
+| Withholding Tax | |
+| Broker Interest Paid | `DEBIT INT` becomes a liability; borrow fees are reported but not deducted |
+| Broker Interest Received | interest and stock-yield-enhancement income |
+| Other Fees / Advisor Fees | reported in a warning, not deducted |
+| Deposits & Withdrawals | ignored, but useful for your own reconciliation |
+
+**Do not tick these — the parser has no mapping for them and the whole import
+fails**: `871(m) Withholding`, `Other Income`, `Carbon Credits`, `Bill Pay`,
+`Broker Fees`, `Price Adjustments`. If your account has 871(m) withholding on
+dividend-equivalent payments from derivatives, it cannot be imported today and
+has to be added to the DA-1 by hand.
+
+`Bond Interest Paid` / `Bond Interest Received` are parsed but then rejected,
+because bonds are not supported. `Commission Adjustments` only works when the
+row is attached to a security.
+
+For the **fields**, "Select All" is safe — unknown attributes are tolerated.
+
+Also include the **Account Information** section: it carries the canton
+(`stateResidentialAddress`), your name, and `ibEntity`. Without it you must set
+`canton` and `full_name` in `config.toml` yourself.
+
+For option positions, either include the `multiplier` field on Trades and Open
+Positions, or include the **Securities Info** section — the importer reads the
+contract size from whichever is present. Include **Options EAE** too, so expiry,
+assignment and exercise are labelled correctly rather than guessed.
+
 ### Essential Flex Query Sections and Fields:
 
 Unfortunately these is no simple way to programmatically set the configuration. However it only needs to be done once and **it should be ok to select all sections and all fields**, so try that first.
@@ -28,7 +81,9 @@ The importer uses the `ibflex` library to parse the XML, this can be quite sensi
 
 1.  **Account Information (`AccountInformation`)**:
     *   Provides account holder details.
-    *   Fields used: `accountId`, `name`, `firstName`, `lastName`, `accountHolderName`.
+    *   Fields used: `accountId`, `name`, `firstName`, `lastName`, `accountHolderName`,
+        `stateResidentialAddress` (canton), `dateOpened`, `dateClosed`, `ibEntity`
+        (country of the cash accounts).
     *   Name parsing: if `lastName` is missing but `name` or `accountHolderName` contains a full name, it is split into first and last components.
 
 2.  **Trades (`Trades`)**:
@@ -53,12 +108,20 @@ The importer uses the `ibflex` library to parse the XML, this can be quite sensi
 6.  **Cash Transactions (`CashTransactions`)**:
     *   Details all cash movements including dividends, interest, fees.
     *   Critical fields per transaction: `dateTime` (or `tradeDate`), `description`, `amount`, `currency`, `conid` (if linked to a security), `isin`, `symbol`, `type` (e.g., "Dividends", "Withholding Tax", "Interest", "Fees", "Deposits/Withdrawals").
-    *   *Note: "Deposits/Withdrawals" are generally ignored. "Fees" and "BrokerInterestPaid" are logged but not currently used to populate specific cost/liability sections in the Steuerauszug.* "BrokerInterestReceived" is processed as income.
+    *   *Note: "Deposits/Withdrawals" are generally ignored. "Fees" and the non-debit part of "BrokerInterestPaid" are reported in a critical warning but not currently used to populate specific cost sections in the Steuerauszug.* "BrokerInterestReceived" is processed as income and `<CUR> DEBIT INT FOR ...` becomes a liability payment.
 
 7.  **Cash Report (`CashReport`)**:
     *   Summarizes cash balances for each currency held.
     *   Critical fields per currency entry: `currency` (code), `endingCash` (or `balance` if `reportDate` aligns with period end).
     *   *Note: Entries for "BASE_SUMMARY" currency are ignored.*
+    *   **Also tick `Dividends`, `Withholding Tax`, `Payment In Lieu` and
+        `Other Fees`.** These are IBKR's own totals for the same movements,
+        summed independently of the transaction rows. When they are present the
+        importer checks the amounts it took in against them and refuses to stay
+        quiet if the two disagree — which is what catches a dividend counted
+        twice or a withholding entry that never arrived. Without them the
+        statement is still produced, but nothing verifies it; you will see a log
+        line saying so.
 
 4.  **Save and Run the Query**:
     *   Save your Flex Query configuration.
@@ -116,7 +179,58 @@ This behaviour is enabled by default (`--use-broker-withholding cap`) and can be
 
 *   **Flex Query Customization**: It's crucial that your Flex Query includes all necessary data fields. Missing fields might lead to incomplete or inaccurate Steuerauszug generation. The code tries to ensure all required fields are present (even if empty when not applicable) but these scenarios have not been extensively tested.
 
-*   **Fees**: Currently fee information is not propagated to the Steuerauszug.
+*   **Fees**: broker fees, ADR fees, advisor fees and *negative* credit interest
+    (IBKR books the latter as "Broker Interest Paid" with a
+    `<CUR> CREDIT INT FOR ...` description, which is a cost rather than debt
+    interest) are reported in the eCH-0196 **Spesenverzeichnis**
+    (`listOfExpenses`), converted to CHF. `expensesDeductible` is deliberately
+    left empty: whether a cost is deductible is for the assessing authority to
+    decide, not for this tool. Negative credit interest is typed as
+    `29 Negativzinsen (im Privatvermögen)`, advisor fees as
+    `15 Vermögensverwaltungskosten`, everything else as `37 Diverse Gebühren`.
+
+*   **Withholding tax on interest** that is not linked to a security cannot be
+    claimed from a bank account row — eCH-0196 gives `bankAccountPaymentType`
+    no DA-1 attributes. It is kept as evidence and named in a critical warning
+    so you can enter it yourself.
+
+*   **Country of a security**: taken from `issuerCountryCode` when the Flex data
+    has one. IBKR leaves it empty on a large share of rows, in which case the
+    ISIN prefix is used (so an `IE...` ETF is filed under Ireland, not the USA).
+    Positions with neither — typically options — fall back to `US` and are
+    listed in a warning so you can correct them. The country drives the DA-1
+    grouping, so it is worth a look.
+
+*   **Country of the cash accounts**: derived from the `ibEntity` field of
+    `AccountInformation` (`IB-UK` → `GB`, `IBIE` → `IE`, `IBLLC` → `US`, ...),
+    because your cash is held by that IBKR entity.
+
+*   **Securities missing from the Kursliste**: the default
+    `--tax-calculation-level kursliste` builds the income rows exclusively from
+    the Kursliste. A security the Kursliste does not list therefore ends up with
+    *no* income rows at all; the statement says so in a critical warning that
+    names the broker amounts that were left out. Run with
+    `--tax-calculation-level fillin` to keep the broker's own dividends instead.
+    In that mode the withholding tax the broker deducted is attached to the
+    dividend as a DA-1 claim, capped at the non-recoverable rate the Kursliste
+    records for the country (tax withheld above the treaty rate has to be
+    reclaimed from the source state, not credited in Switzerland).
+
+*   **Bonds**: not supported. `--tax-calculation-level kursliste` refuses to
+    process them (see issue #262). Note that IBKR quotes bond prices as a
+    percentage of nominal while the importer records every position as `PIECE`,
+    so bond values would be wrong even where the run does not stop.
+
+*   **Short positions** (written options, short stock, puts written against a
+    short): supported behind `--allow-short-positions`, which reports them as
+    negative holdings. How they have to be declared is not settled in Swiss
+    practice, so read [Short Positions](short_positions.md) before using it.
+    Combine it with `--tax-calculation-level fillin`, because exchange-traded
+    options are never in the Kursliste and would otherwise carry no Steuerwert.
+
+*   **Options**: quantities are contracts and prices are per contract (the IBKR
+    `multiplier` is folded into the price). Include `positionValue` in the Flex
+    Query so open positions can be valued.
 
 ## Troubleshooting
 

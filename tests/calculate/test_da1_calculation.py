@@ -214,8 +214,11 @@ def test_da1_calculation_for_share(kursliste_manager, monkeypatch):
 
 
 def test_da1_calculation_v_sign_raises_error(kursliste_manager):
-    """
-    Test that a (V) sign payment raises NotImplementedError.
+    """A (V) payment is unsupported, and costs only its own security.
+
+    The inner computation still refuses it, but ``computePayments`` absorbs the
+    refusal so one scrip dividend cannot abort a whole statement; the income is
+    dropped and reported instead.
     """
     provider = KurslisteExchangeRateProvider(kursliste_manager)
     calc = KurslisteTaxValueCalculator(
@@ -268,5 +271,11 @@ def test_da1_calculation_v_sign_raises_error(kursliste_manager):
     )
 
     calc._current_kursliste_security = kl_sec
+
     with pytest.raises(NotImplementedError):
-        calc.computePayments(sec, "sec")
+        calc._compute_kursliste_payments(sec, "sec")
+
+    # The public entry point survives it, at the cost of that security's income.
+    calc.computePayments(sec, "sec")
+    assert sec.payment == []
+    assert [w["identifier"] for w in calc._unsupported_payment_warnings] == ["US0000000002"]

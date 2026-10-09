@@ -39,7 +39,6 @@ from ...core.kursliste_manager import KurslisteManager
 from ...core.security import determine_security_type
 from ...model.ech0196 import (
     BankAccount,
-    BankAccountPayment,
     Security,
     SecurityPayment,
     SecurityStock,
@@ -91,6 +90,7 @@ def build_tax_overview_data(
     identifiers_csv: Optional[Path] = None,
     prior_year_input_path: Optional[Path] = None,
     canton: Optional[str] = None,
+    allow_short_positions: bool = False,
     online_sectors: bool = False,
 ) -> PipelineResult:
     """Run the broker pipeline and translate the result to TaxOverviewData.
@@ -111,6 +111,7 @@ def build_tax_overview_data(
             config_file=config_file,
             identifiers_csv=identifiers_csv,
             canton=canton,
+            allow_short_positions=allow_short_positions,
         )
 
     statement = _run_pipeline(
@@ -121,6 +122,7 @@ def build_tax_overview_data(
         config_file=config_file,
         identifiers_csv=identifiers_csv,
         canton=canton,
+        allow_short_positions=allow_short_positions,
     )
     broker_fallback = (
         _extract_ibkr_flex_fallback(input_path) if broker == "ibkr" else BrokerFallback.empty()
@@ -147,6 +149,7 @@ def _build_prior_year_closing(
     config_file: Optional[Path],
     identifiers_csv: Optional[Path],
     canton: Optional[str] = None,
+    allow_short_positions: bool = False,
 ) -> Tuple[Dict[str, Decimal], Decimal]:
     """Run the prior-year pipeline and return (per-ISIN closing CHF, total CHF).
 
@@ -163,6 +166,7 @@ def _build_prior_year_closing(
             config_file=config_file,
             identifiers_csv=identifiers_csv,
             canton=canton,
+            allow_short_positions=allow_short_positions,
         )
     except Exception as exc:
         logger.warning(
@@ -356,6 +360,7 @@ def _run_pipeline(
     config_file: Optional[Path],
     identifiers_csv: Optional[Path],
     canton: Optional[str] = None,
+    allow_short_positions: bool = False,
 ) -> TaxStatement:
     period_from = date(tax_year, 1, 1)
     period_to = date(tax_year, 12, 31)
@@ -436,6 +441,7 @@ def _run_pipeline(
         enable_filtering=True,
         importer_name=broker,
         config_settings=general_settings,
+        allow_short_positions=allow_short_positions,
     )
     statement = cleanup.calculate(statement)
 
@@ -830,7 +836,7 @@ def _income_from_security_payment(
     )
     wht_chf = _sum_optional(
         payment.withHoldingTaxClaim,
-        payment.nonRecoverableTax,
+        payment.nonRecoverableTaxAmount,
         payment.additionalWithHoldingTaxUSA,
     )
 
@@ -887,12 +893,11 @@ def _da1_from_security_payment(
     payment: SecurityPayment, security: Security, event: IncomeEvent
 ) -> Optional[DA1Claim]:
     # Only foreign securities with a non-zero non-recoverable / additional US WHT
-    # qualify for a DA-1 row. The Kursliste calculator writes the CHF figure
-    # into nonRecoverableTaxAmount (not nonRecoverableTax), so consider both —
-    # mirroring core.security._has_da1_payments — preferring the explicit
-    # nonRecoverableTax when set to avoid ever counting the same tax twice.
+    # qualify for a DA-1 row. nonRecoverableTaxAmount is the CHF figure eCH-0196
+    # defines; the broker's own amount is in its own currency and must not be
+    # added to a CHF total.
     recoverable = _sum_optional(
-        payment.nonRecoverableTax or payment.nonRecoverableTaxAmount,
+        payment.nonRecoverableTaxAmount,
         payment.additionalWithHoldingTaxUSA,
     )
     if recoverable == 0:
@@ -965,10 +970,10 @@ def _collect_bank_events(
             # Credit interest on a cash account → interest income.
             if amount > 0:
                 rate = payment.exchangeRate or Decimal("1")
-                wht_chf = _sum_optional(
-                    payment.withHoldingTaxClaim,
-                    payment.nonRecoverableTax,
-                )
+                # withHoldingTaxClaim is the only withholding field eCH-0196
+                # gives a bank account payment; foreign tax withheld from
+                # interest has nowhere to go in the format at all.
+                wht_chf = _sum_optional(payment.withHoldingTaxClaim)
                 wht_local = (wht_chf / rate) if rate and rate != 0 else ZERO
                 interest.append(
                     IncomeEvent(

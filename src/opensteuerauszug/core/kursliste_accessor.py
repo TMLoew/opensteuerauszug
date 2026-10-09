@@ -1,4 +1,4 @@
-from typing import Optional, List, Union
+from typing import Any, Optional, List, Union
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
@@ -13,6 +13,19 @@ from opensteuerauszug.model.kursliste import (
     SecurityTypeESTV,
     Da1RateType,
 )
+
+
+def _denomination_of(rate: Any) -> Decimal:
+    """How many units of the foreign currency the quoted rate is for.
+
+    The Kursliste quotes smaller currencies per 100 units — ``denomination="100"
+    value="10.179"`` means 100 HKD are worth 10.179 CHF. Ignoring it overstates
+    every amount in those currencies by a factor of 100.
+    """
+    denomination = getattr(rate, "denomination", None)
+    if not denomination:
+        return Decimal(1)
+    return Decimal(str(denomination))
 
 
 class KurslisteAccessor:
@@ -72,8 +85,7 @@ class KurslisteAccessor:
                     if hasattr(kursliste_instance, 'exchangeRatesYearEnd'):
                         for rate in kursliste_instance.exchangeRatesYearEnd:
                             if rate.currency == currency and rate.year == xml_tax_year:
-                                # denomination = Decimal(str(rate.denomination) if rate.denomination else 1)
-                                denomination = Decimal(1)
+                                denomination = _denomination_of(rate)
                                 if rate.value is not None:
                                     return Decimal(str(rate.value)) / denomination
                                 elif (
@@ -90,8 +102,7 @@ class KurslisteAccessor:
                             and rate.year == xml_tax_year
                             and rate.month == month_str
                         ):
-                            # denomination = Decimal(str(rate.denomination) if rate.denomination else 1)
-                            denomination = Decimal(1)
+                            denomination = _denomination_of(rate)
                             if rate.value is not None:
                                 return Decimal(str(rate.value)) / denomination
 
@@ -101,8 +112,7 @@ class KurslisteAccessor:
                         if (
                             rate.currency == currency and rate.date == reference_date
                         ):  # Direct date match
-                            # denomination = Decimal(str(rate.denomination) if rate.denomination else 1)
-                            denomination = Decimal(1)
+                            denomination = _denomination_of(rate)
                             if rate.value is not None:
                                 return Decimal(str(rate.value)) / denomination
             return None  # No rate found in any Kursliste XML object in the list

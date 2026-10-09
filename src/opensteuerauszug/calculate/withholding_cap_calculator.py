@@ -26,6 +26,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from opensteuerauszug.core.exchange_rate_provider import ExchangeRateProvider
+from opensteuerauszug.model.critical_warning import CriticalWarning, CriticalWarningCategory
 from opensteuerauszug.model.ech0196 import (
     Security,
     SecurityPayment,
@@ -38,12 +40,42 @@ logger = logging.getLogger(__name__)
 class WithholdingCapCalculator:
     """Cap Kursliste withholding to the broker's effective level."""
 
-    def __init__(self, tolerance_chf: Decimal = Decimal("0.05")):
+    def __init__(
+        self,
+        tolerance_chf: Decimal = Decimal("0.05"),
+        exchange_rate_provider: Optional["ExchangeRateProvider"] = None,
+    ):
         self.tolerance_chf = tolerance_chf
+        self.exchange_rate_provider = exchange_rate_provider
         self.capped_securities: Dict[str, List[date]] = {}
+        self.unconvertible_withholding: Dict[str, List[date]] = {}
 
     def calculate(self, tax_statement: TaxStatement) -> TaxStatement:
         if not tax_statement.listOfSecurities or not tax_statement.listOfSecurities.depot:
+            return tax_statement
+
+        if tax_statement.broker_reports_withholding_tax is False:
+            # Every security would look like "broker withheld nothing" and every
+            # Kursliste claim would be capped away — including the Swiss
+            # Verrechnungssteuer. An export that carries no withholding rows at
+            # all says nothing about what was withheld, so cap nothing.
+            logger.warning(
+                "No withholding tax evidence anywhere in the broker data; skipping the "
+                "withholding cap so that Kursliste claims are not zeroed."
+            )
+            tax_statement.critical_warnings.append(
+                CriticalWarning(
+                    category=CriticalWarningCategory.OTHER,
+                    message=(
+                        "The broker data contains no withholding tax entries at all, so "
+                        "the withholding tax and DA-1 amounts in this statement come "
+                        "purely from the Kursliste and could not be checked against what "
+                        "was actually withheld. If your broker did deduct withholding "
+                        "tax, re-export including the withholding tax records."
+                    ),
+                    source="WithholdingCapCalculator",
+                )
+            )
             return tax_statement
 
         for depot in tax_statement.listOfSecurities.depot:
@@ -79,11 +111,14 @@ class WithholdingCapCalculator:
             agg = broker_wht_by_date[p.paymentDate]
             self._accumulate_broker_wht(agg, p)
 
-        # Collect Kursliste exchange rates by date.
+        # Collect Kursliste exchange rates by date, with the currency each one
+        # converts. A rate is only usable for an amount in that same currency.
         kurs_rate_by_date: Dict[date, Optional[Decimal]] = {}
+        kurs_currency_by_date: Dict[date, Optional[str]] = {}
         for p in kursliste_payments:
             if p.paymentDate not in kurs_rate_by_date and p.exchangeRate is not None:
                 kurs_rate_by_date[p.paymentDate] = p.exchangeRate
+                kurs_currency_by_date[p.paymentDate] = p.amountCurrency
 
         for kl_payment in wht_payments:
             d = kl_payment.paymentDate
@@ -100,8 +135,25 @@ class WithholdingCapCalculator:
             elif broker_agg.currency == "CHF":
                 broker_wht_chf = broker_agg.total
             else:
-                rate = kurs_rate_by_date.get(d)
+                rate = self._rate_for(
+                    broker_agg.currency, d, kurs_rate_by_date, kurs_currency_by_date
+                )
                 if rate is None:
+                    # Converting with the wrong currency's rate would cap the claim
+                    # to a fabricated number. AEM, for instance, declares its
+                    # dividend in CAD while IBKR withholds in USD: the CAD rate
+                    # understated the credit by a quarter. Leave the Kursliste
+                    # value alone and tell the reader to check it.
+                    self.unconvertible_withholding.setdefault(
+                        security.securityName or "?", []
+                    ).append(d)
+                    logger.warning(
+                        "No %s exchange rate for %s on %s; leaving the Kursliste withholding "
+                        "uncapped rather than converting with another currency's rate.",
+                        broker_agg.currency,
+                        security.securityName,
+                        d,
+                    )
                     continue
                 broker_wht_chf = broker_agg.total * rate
 
@@ -170,6 +222,12 @@ class WithholdingCapCalculator:
         if kl_payment.nonRecoverableTaxAmount is not None:
             kl_payment.nonRecoverableTaxAmount = Decimal("0.00")
 
+        # No foreign tax was withheld, so there is nothing to credit under
+        # DA-1 either. Leaving lumpSumTaxCredit* populated would have the tax
+        # software claim relief (totalLumpSumTaxCredit) for tax that was
+        # reversed.
+        self._clear_lump_sum_tax_credit(kl_payment)
+
         #  Broker knows better than Kursliste, so clear the (Q) sign if it was set.
         if kl_payment.sign == "(Q)":
             kl_payment.sign = None
@@ -199,6 +257,12 @@ class WithholdingCapCalculator:
         kl_payment.withholding_capped_original_wht_chf = original_wht_chf
 
         kl_payment.nonRecoverableTaxAmount = broker_wht_chf
+        # The DA-1 rate fields have to follow the capped amount: the tax
+        # software reads nonRecoverableTaxPercent / lumpSumTaxCredit* to
+        # reconstruct the claim, and a stale Kursliste rate would re-inflate it
+        # back to the uncapped level.
+        self._rescale_lump_sum_tax_credit(kl_payment, broker_wht_chf)
+
         # Only clear (Q) sign specifically.
         if kl_payment.sign == "(Q)":
             kl_payment.sign = None
@@ -213,6 +277,70 @@ class WithholdingCapCalculator:
             original_wht_chf,
             broker_wht_chf,
         )
+
+    @staticmethod
+    def _gross_revenue_chf(payment: SecurityPayment) -> Decimal:
+        return (payment.grossRevenueA or Decimal("0")) + (payment.grossRevenueB or Decimal("0"))
+
+    @classmethod
+    def _clear_lump_sum_tax_credit(cls, payment: SecurityPayment) -> None:
+        """Drop the DA-1 claim from a payment whose foreign tax was reversed."""
+        if payment.lumpSumTaxCreditAmount is not None:
+            payment.lumpSumTaxCreditAmount = Decimal("0.00")
+        if payment.additionalWithHoldingTaxUSA is not None:
+            payment.additionalWithHoldingTaxUSA = Decimal("0.00")
+        payment.lumpSumTaxCreditPercent = None
+        payment.nonRecoverableTaxPercent = None
+        payment.lumpSumTaxCredit = None
+
+    @classmethod
+    def _rescale_lump_sum_tax_credit(
+        cls, payment: SecurityPayment, capped_wht_chf: Decimal
+    ) -> None:
+        """Bring the DA-1 rate/amount fields in line with *capped_wht_chf*.
+
+        ``lumpSumTaxCreditAmount`` is the sum of the parts recoverable abroad
+        and creditable in Switzerland.  When the broker withheld less than the
+        Kursliste rate, neither part was actually taken, so the whole claim
+        collapses to what the broker withheld.
+        """
+        if payment.lumpSumTaxCreditAmount is not None:
+            payment.lumpSumTaxCreditAmount = min(payment.lumpSumTaxCreditAmount, capped_wht_chf)
+
+        gross = cls._gross_revenue_chf(payment)
+        if gross > Decimal("0"):
+            capped_percent = (capped_wht_chf / gross * Decimal("100")).quantize(Decimal("0.0001"))
+            if payment.nonRecoverableTaxPercent is not None:
+                payment.nonRecoverableTaxPercent = capped_percent
+            if payment.lumpSumTaxCreditPercent is not None:
+                payment.lumpSumTaxCreditPercent = min(
+                    payment.lumpSumTaxCreditPercent, capped_percent
+                )
+        else:
+            payment.nonRecoverableTaxPercent = None
+            payment.lumpSumTaxCreditPercent = None
+
+    def _rate_for(
+        self,
+        currency: str,
+        d: date,
+        kurs_rate_by_date: Dict[date, Optional[Decimal]],
+        kurs_currency_by_date: Dict[date, Optional[str]],
+    ) -> Optional[Decimal]:
+        """The rate that turns *currency* into CHF on *d*, or None.
+
+        The Kursliste payment's own rate is only reused when it converts the
+        very same currency; otherwise it belongs to a different currency and
+        applying it would silently produce a wrong amount.
+        """
+        if self.exchange_rate_provider is not None:
+            try:
+                return self.exchange_rate_provider.get_exchange_rate(currency, d)
+            except (ValueError, KeyError):
+                pass
+        if kurs_currency_by_date.get(d) == currency:
+            return kurs_rate_by_date.get(d)
+        return None
 
     def _track(self, sec_name: str, d: date) -> None:
         self.capped_securities.setdefault(sec_name, []).append(d)

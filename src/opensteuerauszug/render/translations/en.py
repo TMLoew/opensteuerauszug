@@ -25,6 +25,7 @@ TRANSLATIONS = {
     "values_with_da1_usa": "Values with recognition of foreign withholding tax / tax deduction USA",
     "liabilities": "Debts",
     "liabilities_title": "Liabilities",
+    "costs_title": "Expenses register",
     "reconciliation_kursliste_broker": "Kursliste / broker payments reconciliation",
     "tax_statement_in_chf": "Tax statement in CHF",
     # === BARCODE PAGE ===

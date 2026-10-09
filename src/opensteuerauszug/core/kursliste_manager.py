@@ -12,9 +12,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
+import logging
+
 from opensteuerauszug.model.kursliste import Kursliste, Payment
 from .kursliste_db_reader import KurslisteDBReader
 from .kursliste_accessor import KurslisteAccessor
+
+logger = logging.getLogger(__name__)
 
 
 class KurslisteManager:
@@ -89,6 +93,7 @@ class KurslisteManager:
             raise ValueError(f"Directory does not exist or is not a directory: {directory}")
 
         potential_files = list(directory.glob("*.xml")) + list(directory.glob("*.sqlite"))
+        unusable: List[Path] = []
 
         # Determine years and file types
         year_file_map: Dict[int, Dict[str, List[Path]]] = (
@@ -186,6 +191,28 @@ class KurslisteManager:
 
             if data_source:
                 self.kurslisten[year] = KurslisteAccessor(data_source, year)
+            else:
+                unusable.extend(xml_files + sqlite_files)
+
+        if potential_files and not self.kurslisten:
+            # A stray file in the Kursliste directory — a broker export dropped
+            # there, say — is otherwise only visible as an unrelated "no data for
+            # year" failure much later.
+            logger.warning(
+                "No Kursliste could be loaded from %s although it contains %d "
+                "candidate file(s): %s. Files that are not Kursliste data belong "
+                "elsewhere.",
+                directory,
+                len(potential_files),
+                ", ".join(sorted(f.name for f in potential_files)),
+            )
+        elif unusable:
+            logger.warning(
+                "Ignored %d file(s) in %s that could not be read as Kursliste data: %s",
+                len(unusable),
+                directory,
+                ", ".join(sorted(f.name for f in unusable)),
+            )
 
     def _load_kursliste_from_file(
         self, file_path: Path

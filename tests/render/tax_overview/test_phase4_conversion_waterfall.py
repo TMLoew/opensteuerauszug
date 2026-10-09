@@ -22,7 +22,6 @@ from opensteuerauszug.render.tax_overview.conversion import (
 )
 from opensteuerauszug.render.tax_overview.waterfall import (
     DEFAULT_RECONCILIATION_TOLERANCE_CHF,
-    Waterfall,
     WaterfallLine,
     build_waterfall,
 )

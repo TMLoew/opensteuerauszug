@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
-import pytest
 
 from opensteuerauszug.render.tax_overview.orders import (
     DEFAULT_TIME_CLUSTER_WINDOW,

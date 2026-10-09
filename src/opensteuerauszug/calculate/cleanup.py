@@ -51,6 +51,7 @@ class CleanupCalculator:
         override_org_nr: Optional[str] = None,
         config_settings: Optional[GeneralSettings] = None,
         render_language: Language = DEFAULT_LANGUAGE,
+        allow_short_positions: bool = False,
     ):
         self.period_from = period_from
         self.period_to = period_to
@@ -60,7 +61,10 @@ class CleanupCalculator:
         self.override_org_nr = override_org_nr
         self.config_settings = config_settings
         self.render_language = render_language
+        self.allow_short_positions = allow_short_positions
         self.modified_fields: List[str] = []
+        # (pos_id, securityCategory, detail) for every accepted short position.
+        self._short_positions: List[tuple[str, str, str]] = []
 
         # Log if an identifier map was provided
         if self.identifier_map is not None:  # Check if it's not None, could be an empty dict
@@ -79,12 +83,17 @@ class CleanupCalculator:
     def _check_negative_balances(self, security: Security, pos_id: str) -> None:
         """Surface negative non-mutation balances on a security.
 
-        The post-processing layer is unopinionated and lets short positions
-        flow through; this is the single place where we sanity-check them.
-        We log a warning (with a pointer to the relevant tracking issue
-        based on the eCH security category) and then raise so processing
-        stops on data that the downstream calculators can't meaningfully
-        handle.
+        The importers are unopinionated and let short positions flow through;
+        this is the single place where policy is applied. A negative balance is
+        either a genuine short position (a written option, short stock) or the
+        symptom of an import bug, and the two are indistinguishable from here,
+        so the default is to stop.
+
+        With ``allow_short_positions`` the balance is passed through to the
+        valuation stage — ``unitPrice * quantity`` then yields a negative
+        Steuerwert — and the position is recorded so that
+        :meth:`_warn_about_short_positions` can put it on the statement. See
+        ``docs/short_positions.md`` for why this is opt-in.
         """
         negative_balances = [
             s
@@ -94,6 +103,18 @@ class CleanupCalculator:
         if not negative_balances:
             return
 
+        detail = ", ".join(f"{s.quantity} on {s.referenceDate}" for s in negative_balances)
+
+        if self.allow_short_positions:
+            logger.info(
+                "  Security %s: short position(s) accepted (%s); valued at the "
+                "negative of the long price.",
+                pos_id,
+                detail,
+            )
+            self._short_positions.append((pos_id, security.securityCategory, detail))
+            return
+
         if security.securityCategory == "OPTION":
             issue_ref = "https://github.com/vroonhof/opensteuerauszug/issues/261"
         else:
@@ -101,12 +122,45 @@ class CleanupCalculator:
         message = (
             f"Negative balance(s) for security '{pos_id}' "
             f"(category {security.securityCategory}): "
-            + ", ".join(f"{s.quantity} on {s.referenceDate}" for s in negative_balances)
-            + ". Please double-check the data; "
-            f"if you are intentionally holding a short position, see {issue_ref}."
+            + detail
+            + ". Please double-check the data; if you are intentionally holding a "
+            "short position, re-run with --allow-short-positions (read "
+            f"docs/short_positions.md first) or see {issue_ref}."
         )
         logger.warning("  Security %s: %s", pos_id, message)
         raise ValueError(message)
+
+    def _warn_about_short_positions(self, statement: TaxStatement) -> None:
+        """Put the accepted short positions on the statement.
+
+        The Swiss treatment of a short position is not settled: the cantons
+        differ (Thurgau values options at zero in both directions), and the
+        alternative reading is that the obligation belongs in the
+        Schuldenverzeichnis rather than as a negative Wertschrift. Whoever reads
+        the statement has to know that this choice was made.
+        """
+        if not self._short_positions:
+            return
+        listed = "; ".join(
+            f"{pos_id} ({category}): {detail}"
+            for pos_id, category, detail in self._short_positions[:10]
+        )
+        if len(self._short_positions) > 10:
+            listed += f"; and {len(self._short_positions) - 10} more"
+        statement.critical_warnings.append(
+            CriticalWarning(
+                category=CriticalWarningCategory.SHORT_POSITION,
+                message=(
+                    f"{len(self._short_positions)} short position(s) are reported as "
+                    f"negative holdings in the securities register: {listed}. "
+                    "How a short position has to be declared is not settled — some "
+                    "cantons expect the obligation in the Schuldenverzeichnis "
+                    "instead, and options are valued at zero in some cantons. "
+                    "Please check the treatment with your tax authority."
+                ),
+                source="CleanupCalculator",
+            )
+        )
 
     def _generate_tax_statement_id(self, statement: TaxStatement) -> str:
         """
@@ -193,6 +247,7 @@ class CleanupCalculator:
 
     def calculate(self, statement: TaxStatement) -> TaxStatement:
         self.modified_fields = []
+        self._short_positions = []
         logger.info("Starting cleanup calculation...")
 
         # set some standard values
@@ -231,12 +286,23 @@ class CleanupCalculator:
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Set client name from configuration if client exists but lacks name
-        if self.config_settings and self.config_settings.full_name:
-            config_full_name = self.config_settings.full_name
+        # Set the client name from configuration.
+        #
+        # `first_name`/`last_name` are explicit and authoritative: they replace
+        # whatever the importer supplied. A broker spells the account holder
+        # however its own records do — IBKR issues this account to
+        # "Hans P Mueller" — and two statements for the same taxpayer should not
+        # reach the assessor under different names. `full_name` keeps its older,
+        # gentler role of filling blanks only, so configs written before the
+        # explicit fields existed behave exactly as they did.
+        cfg = self.config_settings
+        if cfg and (cfg.full_name or cfg.first_name or cfg.last_name):
+            config_full_name = cfg.full_name
+            explicit_first = (cfg.first_name or "").strip() or None
+            explicit_last = (cfg.last_name or "").strip() or None
 
             # Parse the full name (assuming "First Last" format)
-            name_parts = config_full_name.strip().split()
+            name_parts = (config_full_name or "").strip().split()
             if len(name_parts) >= 2:
                 config_first_name = name_parts[0]
                 config_last_name = ' '.join(name_parts[1:])  # Join remaining parts as last name
@@ -246,6 +312,13 @@ class CleanupCalculator:
             else:
                 config_first_name = None  # Use None instead of empty string
                 config_last_name = None
+
+            # The explicit fields win wherever they are given.
+            config_first_name = explicit_first or config_first_name
+            config_last_name = explicit_last or config_last_name
+            described = config_full_name or " ".join(
+                part for part in (config_first_name, config_last_name) if part
+            )
 
             # If no clients exist, create one with the configured name
             if not statement.client:
@@ -260,19 +333,25 @@ class CleanupCalculator:
                     "No clientNumber available from importer; using placeholder 'NOIDENTI'. "
                     "Set a real client number via importer-specific settings."
                 )
-                logger.info(f"Created client from configuration: {config_full_name}")
+                logger.info(f"Created client from configuration: {described}")
             else:
                 # Check if existing clients need name updates
                 for i, client in enumerate(statement.client):
                     client_modified = False
 
-                    # Set firstName if not already set
-                    if not client.firstName and config_first_name:
+                    # An explicit configured name overrides the importer's;
+                    # otherwise only fill a blank.
+                    if explicit_first and client.firstName != explicit_first:
+                        client.firstName = explicit_first
+                        client_modified = True
+                    elif not client.firstName and config_first_name:
                         client.firstName = config_first_name
                         client_modified = True
 
-                    # Set lastName if not already set
-                    if not client.lastName and config_last_name:
+                    if explicit_last and client.lastName != explicit_last:
+                        client.lastName = explicit_last
+                        client_modified = True
+                    elif not client.lastName and config_last_name:
                         client.lastName = config_last_name
                         client_modified = True
 
@@ -287,9 +366,7 @@ class CleanupCalculator:
 
                     if client_modified:
                         self.modified_fields.append(f"TaxStatement.client[{i}] (name from config)")
-                        logger.info(
-                            f"Updated client[{i}] name from configuration: {config_full_name}"
-                        )
+                        logger.info(f"Updated client[{i}] name from configuration: {described}")
 
         # Generate statement ID if it's missing
         if statement.id is None:
@@ -421,10 +498,14 @@ class CleanupCalculator:
                     # Move negative payments to liabilities. The amount is
                     # captured alongside the payment so type-checkers can see
                     # it has been narrowed to non-None.
+                    # Tax withheld from interest is not interest paid: moving it
+                    # here would deduct it as a Schuldzins. eCH-0196 has no DA-1
+                    # fields on a bank payment, so it stays on the account as
+                    # zero-revenue evidence instead.
                     negative_payments = [
                         (p, p.amount)
                         for p in bank_account.payment
-                        if p.amount is not None and p.amount < 0
+                        if p.amount is not None and p.amount < 0 and not p.is_withholding_tax
                     ]
                     if negative_payments:
                         # Create liability account payments from negative bank account payments
@@ -509,9 +590,12 @@ class CleanupCalculator:
                                 f"  BankAccount {account_id}: Created new liability account for {len(negative_payments)} negative payments."
                             )
 
-                        # Remove negative payments from bank account
+                        # Remove only the payments that actually moved. Anything
+                        # else negative — withholding tax, say — stays on the
+                        # account as evidence instead of disappearing.
+                        moved = {id(p) for p, _amount in negative_payments}
                         bank_account.payment = [
-                            p for p in bank_account.payment if p.amount is None or p.amount >= 0
+                            p for p in bank_account.payment if id(p) not in moved
                         ]
                         self.modified_fields.append(
                             f"{account_id}.payment (moved negative to liabilities)"
@@ -817,6 +901,8 @@ class CleanupCalculator:
                             # --- End Calculate SecurityPayment.quantity ---
         else:
             logger.info("No securities accounts found to process.")
+
+        self._warn_about_short_positions(statement)
 
         if self.modified_fields:
             logger.info(
