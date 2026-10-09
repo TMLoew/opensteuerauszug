@@ -7,7 +7,7 @@ Questo testo non viene riportato
 Questo estratto fiscale è stato creato dal/dai contribuente/i con l'aiuto di OpenSteuerauszug a partire da dati bancari elettronici.
 Serve a semplificare l'inserimento completo dei dati e a evitare errori di digitazione.
 
-Tutti i calcoli fiscali si basano sulla Kursliste e sono solo a scopo informativo.
+{kursliste_basis}
 
 Per maggiori informazioni, vedere la pagina "Nota per l'autorità fiscale"
 
@@ -27,7 +27,7 @@ La responsabilità per l'esattezza e la completezza rimane del contribuente.
 - Egli/ella controlla posizioni, transazioni, numeri di valore e pagamenti di interessi.
 - Il calcolo fiscale definitivo basato sulla Kursliste deve essere effettuato dal software fiscale e/o dal software di tassazione.
 
-Tutti i calcoli fiscali in questo file si basano sulla Kursliste e sono solo a scopo informativo.
+{kursliste_basis}
 
 ## Perché un estratto fiscale?
 

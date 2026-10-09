@@ -310,10 +310,38 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                 )
                 if closing_balance == 0:
                     self._current_security_is_zero_balance_option = True
+            elif closing_balance == 0 and not self._produced_income(security):
+                # Held nothing at year end and paid nothing all year: the missing
+                # Kursliste entry changes no figure in the statement, and saying
+                # so on a filed document buries the entries that do matter. The
+                # same reasoning already exempts rights issues and options above.
+                logger.debug("Suppressing missing Kursliste warning for %s: no tax effect.", ident)
             else:
                 self._missing_kursliste_entries.append(ident)
 
         super()._handle_Security(security, path_prefix)
+
+    @staticmethod
+    def _produced_income(security: Security) -> bool:
+        """True when anything about this security's income still matters.
+
+        Both lists are consulted. ``payment`` is what the statement reports;
+        ``broker_payments`` is what the broker said, and without a Kursliste
+        entry that income is dropped rather than reported — the one case where
+        a sold-out position's missing entry genuinely needs saying, because the
+        statement would otherwise under-declare in silence.
+        """
+        for payment in security.payment or []:
+            if (payment.grossRevenueA or Decimal("0")) or (payment.grossRevenueB or Decimal("0")):
+                return True
+            if payment.amount:
+                return True
+        for payment in security.broker_payments or []:
+            if payment.nonRecoverableTaxAmountOriginal is not None:
+                continue
+            if payment.amount and payment.amount > Decimal("0"):
+                return True
+        return False
 
     def _handle_SecurityTaxValue(self, sec_tax_value: SecurityTaxValue, path_prefix: str) -> None:
         if self._current_kursliste_security and self.kursliste_manager:

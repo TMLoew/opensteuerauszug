@@ -7,7 +7,7 @@ Dieser text wird nicht aufgenommen
 Dieser Steuerauszug wurde von den Steuerpflichtigen mit Hilfe von OpenSteuerauszug aus elektronischen Bankdaten erstellt.
 Er dient der Vereinfachung vollständiger Dateneigenhabe und der Vermeidung von Tippfehlern.
 
-Sämtliche Steuerberechnungen basieren auf der Kursliste und dienen nur Informationszwecken.
+{kursliste_basis}
 
 Für mehr Information siehe die Seite "Hinweis für die Steuerbehörde"
 
@@ -27,7 +27,7 @@ Die Verantwortung für die Richtigkeit und Vollständigkeit obliegt immer noch d
 - Er/Sie kontrolliert Bestände, Transaktionen, Valorennummern und Zinszahlungen.
 - Die definitive auf der Kursliste basierende Steuerberechnung sollte von der Steuersoftware und/oder Veranlagungssoftware übernommen werden.
 
-Sämtliche Steuerberechnungen in dieser Datei basieren auf der Kursliste und dienen nur Informationszwecken.
+{kursliste_basis}
 
 ## Wieso ein Steuerauszug?
 

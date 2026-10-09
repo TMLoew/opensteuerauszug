@@ -17,6 +17,7 @@ from opensteuerauszug.model.ech0196 import (
     ListOfSecurities,
     Security,
     SecurityTaxValue,
+    SecurityPayment,
     SecurityStock,
     TaxStatement,
     ValorNumber,
@@ -2330,9 +2331,13 @@ def test_no_missing_kursliste_warning_for_rights_issue_with_no_tax_value():
 
 
 def test_missing_kursliste_warning_for_security_with_no_tax_value_but_stock_transactions():
-    """A security that was fully sold during the year (no taxValue) but had stock
-    transactions should still emit a MISSING_KURSLISTE warning when the security
-    is not found in the Kursliste."""
+    """A sold-out position with no income says nothing worth saying.
+
+    It holds nothing at year end and paid nothing, so the absent Kursliste entry
+    changes no figure in the statement. Reporting it on a document that goes to
+    the tax office buries the entries that do matter. The warning is still
+    raised when income would be dropped — see the test below.
+    """
     sale_date = date(2024, 6, 20)
 
     # Kursliste exists for 2024 but does NOT contain our test security
@@ -2404,8 +2409,38 @@ def test_missing_kursliste_warning_for_security_with_no_tax_value_but_stock_tran
         for w in result.critical_warnings
         if w.category == CriticalWarningCategory.MISSING_KURSLISTE
     ]
-    assert len(missing_warnings) == 1
-    assert missing_warnings[0].identifier == "US1234567890"
+    assert missing_warnings == []
+
+
+def test_missing_kursliste_warning_is_kept_when_broker_income_would_be_dropped():
+    """The case the warning exists for: silence here would under-declare.
+
+    Without a Kursliste entry the payment list is emptied, so a dividend the
+    broker reported vanishes from the statement. That must be said even though
+    the position itself was sold during the year.
+    """
+    security = Security(
+        country="US",
+        securityName="Sold With Dividend",
+        positionId=1,
+        currency="USD",
+        quotationType="PIECE",
+        securityCategory="SHARE",
+        isin=ISINType("US1234567890"),
+        broker_payments=[
+            SecurityPayment(
+                paymentDate=date(2024, 3, 1),
+                quotationType="PIECE",
+                quantity=Decimal("100"),
+                amountCurrency="USD",
+                amountPerUnit=Decimal("0.5"),
+                amount=Decimal("50"),
+            )
+        ],
+    )
+
+    # The predicate is what the suppression consults; no calculator state needed.
+    assert KurslisteTaxValueCalculator._produced_income(security) is True
 
 
 def test_compute_payments_raises_error_for_multiple_variants_same_event(kursliste_manager):

@@ -46,6 +46,11 @@ TRANSLATIONS = {
     'warn_interest_withholding_join': '; and ',
     'warn_previous_year_exdate': "Payment '{payment_date}' for security '{identifier}' has an ex-date ({ex_date}) in the previous year. The dividend amount is based on the opening position of the period because mutations from the previous year are not processed. Please double-check the amount.",
     "warn_unsupported_payment_reason": "The Kursliste marks the payment on {date} for {identifier} with sign '(V)' (distribution in the form of shares). Its DA-1 treatment is not implemented.",
+    'notice_kursliste_all': 'All tax calculations are based on the Kursliste and are for information only.',
+    'notice_kursliste_partial': 'Tax calculations are based on the Kursliste, with the following exception: {positions} position(s) with a total Steuerwert of {value} CHF are not in the Kursliste and are valued at the broker\'s year-end mark{income}. The securities concerned are listed individually on the \'Critical warnings\' page. All figures are for information only.',
+    'notice_kursliste_partial_income': '; in addition, for {count} income entr(y/ies) totalling {value} CHF the figure comes from the broker rather than the Kursliste',
+    'notice_kursliste_partial_short': 'Tax calculations are based on the Kursliste, except for {positions} position(s) (Steuerwert {value} CHF){income}, which come from the broker; these are listed individually on the warnings page. All figures are for information only.',
+    'notice_kursliste_partial_short_income': ' and {count} income entr(y/ies)',
     # === BARCODE PAGE ===
     "barcode_page": "Barcode page {page} of {total}",
     # === COMMON LABELS ===

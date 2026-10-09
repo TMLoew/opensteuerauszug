@@ -1241,6 +1241,58 @@ def create_minimal_placeholder(styles):
     return Paragraph(text, styles['Normal'])
 
 
+def _kursliste_basis_sentence(tax_statement, short: bool = False) -> str:
+    """State truthfully what the Steuerwerte are based on.
+
+    The notice used to say "Sämtliche Steuerberechnungen basieren auf der
+    Kursliste" unconditionally, while the warnings page admitted that some
+    positions do not. A tax office reading page one is entitled to the real
+    answer there, not a correction twenty pages later — especially as the
+    exception can be a sixth of the securities wealth.
+    """
+    positions = 0
+    position_value = Decimal("0")
+    income_entries = 0
+    income_value = Decimal("0")
+    los = getattr(tax_statement, "listOfSecurities", None)
+    for depot in getattr(los, "depot", None) or []:
+        for security in getattr(depot, "security", None) or []:
+            tax_value = getattr(security, "taxValue", None)
+            if tax_value is not None and not getattr(tax_value, "kursliste", False):
+                value = tax_value.value or Decimal("0")
+                if value and (tax_value.quantity or Decimal("0")):
+                    positions += 1
+                    position_value += value
+            for payment in getattr(security, "payment", None) or []:
+                if getattr(payment, "kursliste", False):
+                    continue
+                gross = (payment.grossRevenueA or Decimal("0")) + (
+                    payment.grossRevenueB or Decimal("0")
+                )
+                if gross:
+                    income_entries += 1
+                    income_value += gross
+
+    if not positions and not income_entries:
+        return t('notice_kursliste_all')
+
+    # Page one carries a compact version: the full sentence crowds the summary
+    # box off the page, and the detail belongs on the page that has room for it.
+    income_key = (
+        'notice_kursliste_partial_short_income' if short else 'notice_kursliste_partial_income'
+    )
+    income_clause = ""
+    if income_entries:
+        income_clause = t(income_key).format(
+            count=income_entries, value=f"{income_value:,.2f}".replace(",", "'")
+        )
+    return t('notice_kursliste_partial_short' if short else 'notice_kursliste_partial').format(
+        positions=positions,
+        value=f"{position_value:,.2f}".replace(",", "'"),
+        income=income_clause,
+    )
+
+
 def _select_template_file(templates_path: Path, base_name: str, language: str) -> str:
     preferred = f"{base_name}.{language}.md"
     if (templates_path / preferred).exists():
@@ -1255,7 +1307,7 @@ def _select_template_file(templates_path: Path, base_name: str, language: str) -
     )
 
 
-def create_dual_info_boxes(styles, usable_width, minimal: bool = False):
+def create_dual_info_boxes(styles, usable_width, minimal: bool = False, kursliste_basis: str = ""):
     """Create two side-by-side information boxes for the first page."""
     templates_path = Path(__file__).parent / 'templates'
 
@@ -1273,6 +1325,8 @@ def create_dual_info_boxes(styles, usable_width, minimal: bool = False):
 
     with open(templates_path / right_file, 'r', encoding='utf-8') as f:
         right_markdown = f.read()
+
+    left_markdown = left_markdown.replace("{kursliste_basis}", kursliste_basis)
 
     left_flowables = markdown_to_platypus(left_markdown, styles=styles, section='short-version')
     right_flowables = markdown_to_platypus(right_markdown, styles=styles, section='short-version')
@@ -2689,11 +2743,17 @@ def render_tax_statement(
     story.append(Paragraph(t('summary'), title_style))
 
     critical_warnings = tax_statement.critical_warnings or []
+    kursliste_basis = _kursliste_basis_sentence(tax_statement, short=True)
+    kursliste_basis_long = _kursliste_basis_sentence(tax_statement)
 
     if use_minimal_frontpage:
         story.append(create_minimal_placeholder(styles))
         story.append(Spacer(1, 0.5 * cm))
-        story.append(create_dual_info_boxes(styles, usable_width, minimal=True))
+        story.append(
+            create_dual_info_boxes(
+                styles, usable_width, minimal=True, kursliste_basis=kursliste_basis
+            )
+        )
     else:
         # Extract tax period and period end date - both are mandatory in the model
         tax_period = str(tax_statement.taxPeriod)
@@ -2765,7 +2825,7 @@ def render_tax_statement(
         story.append(Spacer(1, 0.5 * cm))
 
         # Info boxes below the summary table
-        story.append(create_dual_info_boxes(styles, usable_width))
+        story.append(create_dual_info_boxes(styles, usable_width, kursliste_basis=kursliste_basis))
 
     # Show a prominent hint on the summary page when critical warnings exist
     story.extend(create_critical_warnings_hint(critical_warnings, styles))
@@ -2851,7 +2911,7 @@ def render_tax_statement(
     tax_office_file = _select_template_file(templates_path, left_base, _current_language)
     tax_payer_file = _select_template_file(templates_path, right_base, _current_language)
     with open(templates_path / tax_office_file, 'r', encoding='utf-8') as f:
-        tax_office_markdown = f.read()
+        tax_office_markdown = f.read().replace("{kursliste_basis}", kursliste_basis_long)
     with open(templates_path / tax_payer_file, 'r', encoding='utf-8') as f:
         tax_payer_markdown = f.read()
 

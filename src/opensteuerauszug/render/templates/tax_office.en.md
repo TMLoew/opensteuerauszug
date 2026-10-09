@@ -7,7 +7,7 @@ This text is not included
 This tax statement was created by the taxpayer(s) using OpenSteuerauszug from electronic bank data.
 It serves to simplify complete data entry and avoid typos.
 
-All tax calculations are based on the Kursliste and are for information purposes only.
+{kursliste_basis}
 
 For more information see the page "Note for the tax office"
 
@@ -27,7 +27,7 @@ Responsibility for accuracy and completeness still lies with the taxpayer.
 - He/she checks holdings, transactions, Valor numbers and interest payments.
 - The definitive tax calculation based on the Kursliste should be taken over by the tax software and/or assessment software.
 
-All tax calculations in this file are based on the Kursliste and are for information purposes only.
+{kursliste_basis}
 
 ## Why a tax statement?
 
