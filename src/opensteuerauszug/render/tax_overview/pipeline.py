@@ -535,10 +535,12 @@ def _translate_statement(
     # (which sums the same BROKERINTPAID cash transactions). When the fallback
     # saw them, keep it as the single source for the totals and drop the
     # FeeEvent duplicates; the Gebühren sheet still lists every line item.
+    # Withheld tax is listed on the Gebühren sheet for completeness but is never
+    # part of the cost total: it is tax, not a fee.
     if fallback.debit_interest_chf > 0:
-        total_fee_events = [f for f in fees if f.kind != "interest_debit"]
+        total_fee_events = [f for f in fees if f.kind not in ("interest_debit", "withholding_tax")]
     else:
-        total_fee_events = fees
+        total_fee_events = [f for f in fees if f.kind != "withholding_tax"]
 
     waterfall = _build_waterfall(
         opening_chf=opening_chf,
@@ -949,16 +951,30 @@ def _collect_bank_events(
                 gross_chf = (amount * rate).quantize(Decimal("0.01"))
 
             name_upper = (payment.name or "").upper()
+            # Tax withheld at source is not a cost of running the account, and
+            # showing it among the fees both misdescribes it and inflates the
+            # cost total. `is_withholding_tax` is internal state and does not
+            # survive a round-trip through XML, so the name is also consulted:
+            # IBKR writes these as "WITHHOLDING @ 20% ON CREDIT INT FOR ...".
+            is_withholding = bool(getattr(payment, "is_withholding_tax", False)) or (
+                "WITHHOLDING" in name_upper
+            )
             is_fee = (
                 (amount < 0)
                 or ("DEBIT INT" in name_upper)
                 or any(kw in name_upper for kw in _FEE_KEYWORDS)
             )
             if is_fee or payment.bankingExpenses:
+                if is_withholding:
+                    kind = "withholding_tax"
+                elif "DEBIT" in name_upper:
+                    kind = "interest_debit"
+                else:
+                    kind = "other"
                 fees.append(
                     FeeEvent(
                         fee_date=payment.paymentDate,
-                        kind="interest_debit" if "DEBIT" in name_upper else "other",
+                        kind=kind,
                         description=payment.name or f"{ba.bankAccountName} fee",
                         amount_local=abs(amount),
                         currency=payment.amountCurrency,

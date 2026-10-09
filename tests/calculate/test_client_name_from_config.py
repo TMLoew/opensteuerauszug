@@ -9,6 +9,7 @@ override whatever the importer supplied.
 """
 
 from datetime import date
+from decimal import Decimal
 
 
 from opensteuerauszug.calculate.cleanup import CleanupCalculator
@@ -76,3 +77,32 @@ def test_only_a_surname_may_be_overridden():
 def test_no_name_configuration_leaves_the_client_untouched():
     client = _run(_statement("Hans", "M Mueller"))
     assert (client.firstName, client.lastName) == ("Hans", "M Mueller")
+
+
+def test_withheld_tax_is_not_swept_into_liabilities_after_a_round_trip():
+    """`is_withholding_tax` is exclude=True and dies in the XML.
+
+    A dumped-and-reimported statement must still not deduct withheld tax as
+    Schuldzins, so the description has to carry the distinction.
+    """
+    from opensteuerauszug.calculate.cleanup import _is_withholding_payment
+    from opensteuerauszug.model.ech0196 import BankAccountPayment
+
+    def payment(name, flagged):
+        return BankAccountPayment(
+            paymentDate=date(2025, 11, 5),
+            name=name,
+            amountCurrency="USD",
+            amount=Decimal("-72.87"),
+            grossRevenueA=Decimal("0"),
+            grossRevenueB=Decimal("0"),
+            withHoldingTaxClaim=Decimal("0"),
+            is_withholding_tax=flagged,
+        )
+
+    withholding = "WITHHOLDING @ 20% ON CREDIT INT FOR OCT-2025"
+    assert _is_withholding_payment(payment(withholding, True)) is True
+    # the flag is gone after a round-trip; the name must still save it
+    assert _is_withholding_payment(payment(withholding, False)) is True
+    # a real cost is still a cost
+    assert _is_withholding_payment(payment("USD DEBIT INT FOR SEP-2025", False)) is False

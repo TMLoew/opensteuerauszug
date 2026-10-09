@@ -32,6 +32,24 @@ from opensteuerauszug.render.translations import get_text, Language, DEFAULT_LAN
 logger = logging.getLogger(__name__)
 
 
+def _is_withholding_payment(payment: "BankAccountPayment") -> bool:
+    """True when a negative bank payment is tax withheld, not a cost.
+
+    Withheld tax must not be swept into the liability account, where it would
+    be deducted as Schuldzins — turning tax someone else kept into an expense
+    the taxpayer claims.
+
+    ``is_withholding_tax`` carries this from the importer, but it is
+    ``exclude=True`` (eCH-0196 has no attribute for it) and so does not survive
+    a dump-and-reimport. The description is therefore consulted as well, which
+    is what the raw-import path has to rely on: IBKR writes these rows as
+    "WITHHOLDING @ 20% ON CREDIT INT FOR <month>".
+    """
+    if getattr(payment, "is_withholding_tax", False):
+        return True
+    return "WITHHOLDING" in (payment.name or "").upper()
+
+
 class CleanupCalculator:
     """
     Calculator responsible for initial cleanup tasks:
@@ -79,6 +97,38 @@ class CleanupCalculator:
             logger.info("Initialized with configuration settings.")
         else:
             logger.info("Initialized without configuration settings.")
+
+    def _security_has_tax_effect(self, security: Security) -> bool:
+        """False when a position closed flat and paid nothing all year.
+
+        An expired option contract has no ISIN to map to — it is not a listed
+        security — so telling the reader to add it to security_identifiers.csv
+        is advice that cannot be followed. Such a contract is also worth nothing
+        at year end and produced no income, so nothing about the statement
+        changes either way. Twenty-two of these buried the handful of warnings
+        that did matter, on a document whose whole value is that its warnings
+        get read.
+
+        The same suppression already exists for the missing-Kursliste warning
+        (kursliste_tax_value_calculator). When the balance cannot be determined
+        the warning is kept: silence should have to be earned.
+        """
+        if security.payment:
+            return True
+        if security.taxValue is not None and security.taxValue.quantity:
+            return True
+        if not security.stock or self.period_to is None:
+            return True
+        period_end_plus_one = self.period_to + timedelta(days=1)
+        balances = [
+            st
+            for st in security.stock
+            if not st.mutation and st.referenceDate <= period_end_plus_one
+        ]
+        if not balances:
+            return True
+        latest = max(balances, key=lambda st: st.referenceDate)
+        return bool(latest.quantity)
 
     def _check_negative_balances(self, security: Security, pos_id: str) -> None:
         """Surface negative non-mutation balances on a security.
@@ -505,7 +555,7 @@ class CleanupCalculator:
                     negative_payments = [
                         (p, p.amount)
                         for p in bank_account.payment
-                        if p.amount is not None and p.amount < 0 and not p.is_withholding_tax
+                        if p.amount is not None and p.amount < 0 and not _is_withholding_payment(p)
                     ]
                     if negative_payments:
                         # Create liability account payments from negative bank account payments
@@ -707,9 +757,13 @@ class CleanupCalculator:
                         # After enrichment attempt, warn about symbols that still
                         # lack an ISIN and valor number.  This typically means the
                         # symbol could not be mapped via the identifiers CSV.
-                        if security.symbol and (
-                            not security.isin
-                            and (not security.valorNumber or security.valorNumber == 0)
+                        if (
+                            security.symbol
+                            and (
+                                not security.isin
+                                and (not security.valorNumber or security.valorNumber == 0)
+                            )
+                            and self._security_has_tax_effect(security)
                         ):
                             warning_msg = (
                                 f"Symbol '{security.symbol}' could not be mapped "
