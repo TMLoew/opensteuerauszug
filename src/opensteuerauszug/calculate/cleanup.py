@@ -153,7 +153,9 @@ class CleanupCalculator:
         if not negative_balances:
             return
 
-        detail = ", ".join(f"{s.quantity} on {s.referenceDate}" for s in negative_balances)
+        # "qty @ date": a symbol rather than an English word, so the detail reads
+        # the same whatever language the statement is rendered in.
+        detail = ", ".join(f"{s.quantity} @ {s.referenceDate}" for s in negative_balances)
 
         if self.allow_short_positions:
             logger.info(
@@ -201,12 +203,9 @@ class CleanupCalculator:
             CriticalWarning(
                 category=CriticalWarningCategory.SHORT_POSITION,
                 message=(
-                    f"{len(self._short_positions)} short position(s) are reported as "
-                    f"negative holdings in the securities register: {listed}. "
-                    "How a short position has to be declared is not settled — some "
-                    "cantons expect the obligation in the Schuldenverzeichnis "
-                    "instead, and options are valued at zero in some cantons. "
-                    "Please check the treatment with your tax authority."
+                    get_text("warn_short_positions", self.render_language).format(
+                        count=len(self._short_positions), listed=listed
+                    )
                 ),
                 source="CleanupCalculator",
             )

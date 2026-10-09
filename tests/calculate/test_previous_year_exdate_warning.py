@@ -12,6 +12,7 @@ from opensteuerauszug.calculate.payment_reconciliation_calculator import (
 from opensteuerauszug.core.kursliste_accessor import KurslisteAccessor
 from opensteuerauszug.core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
 from opensteuerauszug.core.kursliste_manager import KurslisteManager
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE, get_text
 from opensteuerauszug.model.critical_warning import CriticalWarningCategory
 from opensteuerauszug.model.ech0196 import (
     Depot,
@@ -147,8 +148,9 @@ def test_previous_year_exdate_generates_critical_warning():
         if w.category == CriticalWarningCategory.PREVIOUS_YEAR_EXDATE
     ]
     assert len(warnings) == 1
-    assert "ex-date" in warnings[0].message
-    assert "2023-12-20" in warnings[0].message
+    assert warnings[0].message == get_text("warn_previous_year_exdate", DEFAULT_LANGUAGE).format(
+        payment_date="2024-01-15", identifier="US0000000000", ex_date="2023-12-20"
+    )
     assert warnings[0].source == "KurslisteTaxValueCalculator"
     assert warnings[0].identifier == "US0000000000"
 
@@ -227,9 +229,10 @@ def test_warning_message_contains_key_information():
     ]
     assert len(warnings) == 1
     msg = warnings[0].message
+    # Keyed off the template so the test does not pin a language.
+    tpl = get_text("warn_previous_year_exdate", DEFAULT_LANGUAGE)
     assert "2023-12-15" in msg
-    assert "opening position" in msg
-    assert "double-check" in msg
+    assert msg.endswith(tpl.split("{ex_date}")[1][1:])
 
 
 def test_previous_year_exdate_warning_dismissed_when_reconciliation_matches():

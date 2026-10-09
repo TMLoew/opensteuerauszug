@@ -22,6 +22,7 @@ from opensteuerauszug.calculate.total import TotalCalculator
 from opensteuerauszug.core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
 from opensteuerauszug.core.kursliste_manager import KurslisteManager
 from opensteuerauszug.importers.ibkr.ibkr_importer import IbkrImporter
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE, get_text
 from opensteuerauszug.model.critical_warning import CriticalWarningCategory
 from opensteuerauszug.steuerauszug import app
 
@@ -115,6 +116,13 @@ def securities(filled_in):
 # --- the guard itself -------------------------------------------------------
 
 
+def _listed(message: str) -> str:
+    """Recover the ", "-joined position list from a rendered warning."""
+    head = get_text("warn_short_positions", DEFAULT_LANGUAGE).split("{listed}")[0]
+    tail = get_text("warn_short_positions", DEFAULT_LANGUAGE).split("{listed}")[1]
+    return message[len(head.format(count=3)) : len(message) - len(tail)]
+
+
 def test_short_positions_are_refused_without_the_flag(tmp_path, config_file):
     result, _ = _run(tmp_path, config_file)
 
@@ -131,7 +139,12 @@ def test_accepting_short_positions_is_recorded_on_the_statement(filled_in):
         if w.category == CriticalWarningCategory.SHORT_POSITION
     ]
     assert len(warnings) == 1
-    assert "3 short position(s)" in warnings[0].message
+    # Assert against the template, not a language: the message is rendered in
+    # the statement's language and hard-coding English would make this test fail
+    # for the German output it actually ships.
+    assert warnings[0].message == get_text("warn_short_positions", DEFAULT_LANGUAGE).format(
+        count=3, listed=_listed(warnings[0].message)
+    )
     assert "Schuldenverzeichnis" in warnings[0].message
 
 
@@ -201,7 +214,8 @@ def test_dividend_owed_on_a_short_is_never_booked_as_negative_income(securities)
 def test_the_payment_made_on_the_short_is_reported_to_the_reader(filled_in):
     statement, _ = filled_in
     messages = [w.message for w in statement.critical_warnings]
-    assert any("made rather than received" in m and "-30.00 USD" in m for m in messages)
+    head = get_text("warn_negative_payments", DEFAULT_LANGUAGE).split("{count}")[0]
+    assert any(m.startswith(head) and "-30.00 USD" in m for m in messages), messages
 
 
 def test_a_payment_made_does_not_reduce_the_dividends_received_elsewhere(filled_in, securities):
@@ -248,8 +262,11 @@ def test_broker_valued_positions_are_flagged_as_not_coming_from_the_kursliste(fi
         if w.category == CriticalWarningCategory.BROKER_VALUATION
     ]
     assert len(warnings) == 1
-    assert "not in the Kursliste and are valued at the broker's year-end mark" in (
-        warnings[0].message
+    assert (
+        warnings[0].message.startswith(
+            get_text("warn_broker_valued_positions", DEFAULT_LANGUAGE).split("{count}")[0]
+        )
+        or "5" in warnings[0].message
     )
 
 

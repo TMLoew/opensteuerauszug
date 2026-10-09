@@ -17,7 +17,7 @@ from opensteuerauszug.core.exchange_rate_provider import ExchangeRateProvider
 
 
 from opensteuerauszug.core.flag_override_provider import FlagOverrideProvider
-from opensteuerauszug.render.translations import Language, DEFAULT_LANGUAGE
+from opensteuerauszug.render.translations import Language, DEFAULT_LANGUAGE, get_text
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +88,9 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 CriticalWarning(
                     category=CriticalWarningCategory.BROKER_VALUATION,
                     message=(
-                        f"{reason} The income reported here for {identifier} is the "
-                        "broker's, not the Kursliste's. Verify it by hand."
+                        get_text("warn_broker_income_used", self.render_language).format(
+                            reason=reason, identifier=identifier
+                        )
                     ),
                     source="FillInTaxValueCalculator",
                     identifier=identifier,
@@ -116,12 +117,9 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
             CriticalWarning(
                 category=CriticalWarningCategory.OTHER,
                 message=(
-                    f"{len(self._negative_payments)} payment(s) were made rather than "
-                    f"received — typically the dividend owed on a short position: "
-                    f"{listed}. They are reported as zero income because a private tax "
-                    "return has no negative revenue, and they do not reduce the "
-                    "dividends received elsewhere. Check with your tax authority "
-                    "whether they are deductible as a cost."
+                    get_text("warn_negative_payments", self.render_language).format(
+                        count=len(self._negative_payments), listed=listed
+                    )
                 ),
                 source="FillInTaxValueCalculator",
             )
@@ -143,11 +141,9 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 CriticalWarning(
                     category=CriticalWarningCategory.BROKER_VALUATION,
                     message=(
-                        f"{len(self._broker_valued_positions)} position(s) are not in "
-                        f"the Kursliste and are valued at the broker's year-end mark "
-                        f"instead: {listed}. Contrary to the note on the first page, "
-                        "these Steuerwerte do not come from the Kursliste. Check them "
-                        "against your broker statement."
+                        get_text("warn_broker_valued_positions", self.render_language).format(
+                            count=len(self._broker_valued_positions), listed=listed
+                        )
                     ),
                     source="FillInTaxValueCalculator",
                 )
@@ -160,10 +156,9 @@ class FillInTaxValueCalculator(KurslisteTaxValueCalculator):
                 CriticalWarning(
                     category=CriticalWarningCategory.BROKER_VALUATION,
                     message=(
-                        f"{len(self._unvaluable_positions)} position(s) have no "
-                        f"Kursliste entry and no broker valuation either, so they are "
-                        f"reported without a Steuerwert: {listed}. Add `positionValue` "
-                        "to your broker export, or enter these positions by hand."
+                        get_text("warn_unvaluable_positions", self.render_language).format(
+                            count=len(self._unvaluable_positions), listed=listed
+                        )
                     ),
                     source="FillInTaxValueCalculator",
                 )

@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 
 from opensteuerauszug.calculate.withholding_cap_calculator import WithholdingCapCalculator
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE, get_text
 from opensteuerauszug.importers.ibkr.ibkr_importer import IbkrImporter
 from opensteuerauszug.model.critical_warning import CriticalWarningCategory
 from opensteuerauszug.model.ech0196 import (
@@ -160,7 +161,8 @@ def test_dividends_without_any_withholding_row_are_flagged_as_incomplete():
 
     assert statement.broker_reports_withholding_tax is False
     messages = [w.message for w in statement.critical_warnings]
-    assert any("no withholding tax records" in m for m in messages)
+    expected = get_text("warn_dividends_without_withholding", DEFAULT_LANGUAGE)
+    assert any(m == expected for m in messages), messages
 
 
 def test_an_export_with_withholding_is_not_flagged():
@@ -229,7 +231,8 @@ def test_withholding_is_not_capped_away_when_the_export_carries_no_withholding()
     assert payment.withHoldingTaxClaim == Decimal("53.38")
     assert payment.grossRevenueA == Decimal("152.50")
     assert any(
-        w.category == CriticalWarningCategory.OTHER and "no withholding tax entries" in w.message
+        w.category == CriticalWarningCategory.OTHER
+        and w.message == get_text("warn_no_withholding_records", DEFAULT_LANGUAGE)
         for w in statement.critical_warnings
     )
 

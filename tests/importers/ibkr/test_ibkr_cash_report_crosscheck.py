@@ -12,6 +12,7 @@ from datetime import date
 import pytest
 
 from opensteuerauszug.importers.ibkr.ibkr_importer import IbkrImporter
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE, get_text
 from opensteuerauszug.model.critical_warning import CriticalWarningCategory
 
 pytest.importorskip("ibflex")
@@ -48,12 +49,16 @@ def _import(xml: str):
     return importer.import_files([path])
 
 
+def _mismatch_head():
+    """The fixed opening of the mismatch warning, in whatever language it ships."""
+    return get_text("warn_cash_report_mismatch", DEFAULT_LANGUAGE).split("{listed}")[0]
+
+
 def _crosscheck_warnings(statement):
     return [
         w
         for w in statement.critical_warnings
-        if w.category == CriticalWarningCategory.OTHER
-        and "DO NOT MATCH THE BROKER'S OWN TOTALS" in w.message
+        if w.category == CriticalWarningCategory.OTHER and w.message.startswith(_mismatch_head())
     ]
 
 
@@ -82,7 +87,9 @@ def test_doubled_transactions_are_caught():
 
     (warning,) = _crosscheck_warnings(statement)
     assert "imported 200.00 (off by +100.00)" in warning.message
-    assert "Do not file this statement" in warning.message
+    assert warning.message.endswith(
+        get_text("warn_cash_report_mismatch", DEFAULT_LANGUAGE).split("{listed}")[1]
+    )
 
 
 def test_withholding_that_never_arrived_is_caught():

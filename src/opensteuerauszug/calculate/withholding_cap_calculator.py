@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from opensteuerauszug.core.exchange_rate_provider import ExchangeRateProvider
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE, Language, get_text
 from opensteuerauszug.model.critical_warning import CriticalWarning, CriticalWarningCategory
 from opensteuerauszug.model.ech0196 import (
     Security,
@@ -44,9 +45,11 @@ class WithholdingCapCalculator:
         self,
         tolerance_chf: Decimal = Decimal("0.05"),
         exchange_rate_provider: Optional["ExchangeRateProvider"] = None,
+        render_language: Language = DEFAULT_LANGUAGE,
     ):
         self.tolerance_chf = tolerance_chf
         self.exchange_rate_provider = exchange_rate_provider
+        self.render_language = render_language
         self.capped_securities: Dict[str, List[date]] = {}
         self.unconvertible_withholding: Dict[str, List[date]] = {}
 
@@ -66,13 +69,7 @@ class WithholdingCapCalculator:
             tax_statement.critical_warnings.append(
                 CriticalWarning(
                     category=CriticalWarningCategory.OTHER,
-                    message=(
-                        "The broker data contains no withholding tax entries at all, so "
-                        "the withholding tax and DA-1 amounts in this statement come "
-                        "purely from the Kursliste and could not be checked against what "
-                        "was actually withheld. If your broker did deduct withholding "
-                        "tax, re-export including the withholding tax records."
-                    ),
+                    message=(get_text("warn_no_withholding_records", self.render_language)),
                     source="WithholdingCapCalculator",
                 )
             )

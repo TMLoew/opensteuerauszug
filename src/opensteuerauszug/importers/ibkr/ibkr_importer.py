@@ -709,11 +709,9 @@ class IbkrImporter:
             CriticalWarning(
                 category=CriticalWarningCategory.OTHER,
                 message=(
-                    "THE AMOUNTS IN THIS STATEMENT DO NOT MATCH THE BROKER'S OWN TOTALS: "
-                    f"{listed}. Do not file this statement until the difference is "
-                    "explained. It usually means the export lists transactions at more "
-                    "than one level of detail, or that a transaction type is missing "
-                    "from it."
+                    get_text("warn_cash_report_mismatch", self.render_language).format(
+                        listed=listed
+                    )
                 ),
                 source="IbkrImporter",
             )
@@ -747,8 +745,8 @@ class IbkrImporter:
         ]
         tax_statement.listOfExpenses = ListOfExpenses(expense=expenses)
 
-    @staticmethod
     def _warn_about_omitted_cash(
+        self,
         tax_statement: TaxStatement,
         omitted_cash_items: Sequence[tuple[str, Decimal, str, str]],
     ) -> None:
@@ -770,17 +768,16 @@ class IbkrImporter:
             CriticalWarning(
                 category=CriticalWarningCategory.OTHER,
                 message=(
-                    f"{len(omitted_cash_items)} cost(s) totalling {rendered} (broker fees, "
-                    "ADR fees, advisor fees, negative credit interest) are listed in the "
-                    "expenses register. Whether they are deductible is for the assessing "
-                    "authority to decide, so no deductible amount is claimed here."
+                    get_text("warn_costs_in_expenses", self.render_language).format(
+                        count=len(omitted_cash_items), rendered=rendered
+                    )
                 ),
                 source="IbkrImporter",
             )
         )
 
-    @staticmethod
     def _warn_about_interest_withholding(
+        self,
         tax_statement: TaxStatement,
         interest_withholding: Sequence[tuple[str, Decimal, str]],
     ) -> None:
@@ -804,24 +801,25 @@ class IbkrImporter:
             # has withHoldingTaxClaim) — this tool just does not derive it from a
             # separate tax row yet.
             parts.append(
-                ", ".join(f"{a:.2f} {c}" for c, a in swiss.items())
-                + " of Swiss withholding tax (Verrechnungssteuer)"
+                get_text("warn_interest_withholding_swiss", self.render_language).format(
+                    amounts=", ".join(f"{a:.2f} {c}" for c, a in swiss.items())
+                )
             )
         if foreign:
             parts.append(
-                ", ".join(f"{a:.2f} {c}" for c, a in foreign.items())
-                + " of foreign withholding tax, which eCH-0196 cannot express on a bank "
-                "account payment at all"
+                get_text("warn_interest_withholding_foreign", self.render_language).format(
+                    amounts=", ".join(f"{a:.2f} {c}" for c, a in foreign.items())
+                )
             )
         tax_statement.critical_warnings.append(
             CriticalWarning(
                 category=CriticalWarningCategory.OTHER,
                 message=(
-                    "Tax was withheld from interest that is not linked to a security: "
-                    + "; and ".join(parts)
-                    + ". It is carried as evidence only and is NOT claimed anywhere in this "
-                    "statement. Claim it on the Wertschriftenverzeichnis (Verrechnungssteuer) "
-                    "or the DA-1 form (foreign) yourself."
+                    get_text("warn_interest_withholding", self.render_language).format(
+                        parts=get_text("warn_interest_withholding_join", self.render_language).join(
+                            parts
+                        )
+                    )
                 ),
                 source="IbkrImporter",
             )
@@ -1700,14 +1698,7 @@ class IbkrImporter:
             tax_statement.critical_warnings.append(
                 CriticalWarning(
                     category=CriticalWarningCategory.OTHER,
-                    message=(
-                        "The broker export contains dividends but no withholding tax "
-                        "records at all. Any Verrechnungssteuer or DA-1 claim in this "
-                        "statement therefore rests on the Kursliste alone and was not "
-                        "checked against what was withheld. If tax was deducted, re-run "
-                        "the Flex Query with the 'Withholding Tax' cash transaction type "
-                        "selected."
-                    ),
+                    message=(get_text("warn_dividends_without_withholding", self.render_language)),
                     source="IbkrImporter",
                 )
             )

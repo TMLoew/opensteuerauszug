@@ -15,6 +15,7 @@ import pytest
 from opensteuerauszug.calculate.cleanup import CleanupCalculator
 from opensteuerauszug.config.models import GeneralSettings
 from opensteuerauszug.importers.ibkr.ibkr_importer import IbkrImporter
+from opensteuerauszug.render.translations import DEFAULT_LANGUAGE, get_text
 from opensteuerauszug.model.critical_warning import CriticalWarningCategory
 
 pytest.importorskip("ibflex")
@@ -52,6 +53,14 @@ def statement():
     return importer.import_files([path])
 
 
+def _rendered(message: str) -> str:
+    """Recover the "12.00 USD, 2.92 CHF" part from a rendered warning."""
+    tpl = get_text("warn_costs_in_expenses", DEFAULT_LANGUAGE)
+    head = tpl.split("{rendered}")[0].format(count=2)
+    tail = tpl.split("{rendered}")[1]
+    return message[len(head) : len(message) - len(tail)]
+
+
 def test_fees_and_negative_credit_interest_become_expenses(statement):
     assert statement.listOfExpenses is not None
     names = {e.name for e in statement.listOfExpenses.expense}
@@ -64,8 +73,9 @@ def test_the_costs_are_still_called_out_for_the_reader(statement):
         w for w in statement.critical_warnings if w.category == CriticalWarningCategory.OTHER
     ]
     assert len(warnings) == 1
-    assert "2 cost(s)" in warnings[0].message
-    assert "assessing authority" in warnings[0].message
+    assert warnings[0].message == get_text("warn_costs_in_expenses", DEFAULT_LANGUAGE).format(
+        count=2, rendered=_rendered(warnings[0].message)
+    )
     assert warnings[0].source == "IbkrImporter"
 
 
@@ -151,5 +161,9 @@ def test_withholding_on_interest_is_reported_as_unclaimed():
     statement = _import_withholding_sample()
 
     messages = [w.message for w in statement.critical_warnings]
-    assert any("16.96 HKD of foreign withholding tax" in m for m in messages)
-    assert any("DA-1 form (foreign) yourself" in m for m in messages)
+    foreign = get_text("warn_interest_withholding_foreign", DEFAULT_LANGUAGE).format(
+        amounts="16.96 HKD"
+    )
+    tail = get_text("warn_interest_withholding", DEFAULT_LANGUAGE).split("{parts}")[1]
+    assert any(foreign in m for m in messages), messages
+    assert any(m.endswith(tail) for m in messages), messages

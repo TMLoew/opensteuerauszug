@@ -152,9 +152,9 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                     CriticalWarning(
                         category=CriticalWarningCategory.MISSING_KURSLISTE,
                         message=(
-                            f"Security {entry} was not found in the Kursliste. "
-                            "Tax values and income for this security may be "
-                            "incorrect or missing." + dropped
+                            self._translate("warn_missing_kursliste").format(
+                                entry=entry, dropped=dropped
+                            )
                         ),
                         source="KurslisteTaxValueCalculator",
                         identifier=entry,
@@ -628,7 +628,11 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
         logger.warning("%s No income is reported for this security.", exc)
         self._unsupported_payment_warnings.append(
             {
-                "message": f"{exc} No income is reported for it in this statement.",
+                "message": self._translate("warn_unsupported_payment").format(
+                    date=getattr(exc, "payment_date", "") or "",
+                    identifier=getattr(exc, "identifier", "")
+                    or self._security_identifier(security),
+                ),
                 "identifier": self._security_identifier(security),
             }
         )
@@ -706,14 +710,10 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
                 tax_year = security.taxValue.referenceDate.year
                 if pay.exDate.year < tax_year:
                     sec_ident = security.isin or security.securityName
-                    warning_msg = (
-                        f"Payment '{pay.paymentDate}' for security "
-                        f"'{sec_ident}' has an ex-date "
-                        f"({pay.exDate}) in the previous year. "
-                        f"The dividend amount is based on the "
-                        f"opening position of the period because "
-                        f"mutations from the previous year are not "
-                        f"processed. Please double-check the amount."
+                    warning_msg = self._translate("warn_previous_year_exdate").format(
+                        payment_date=pay.paymentDate,
+                        identifier=sec_ident,
+                        ex_date=pay.exDate,
                     )
                     logger.warning(warning_msg)
                     self._previous_year_exdate_warnings.append(
@@ -946,12 +946,10 @@ class KurslisteTaxValueCalculator(MinimalTaxValueCalculator):
 
             if effective_sign == "(V)":
                 raise UnsupportedKurslistePayment(
-                    f"The Kursliste marks the payment on {pay.paymentDate} for "
-                    f"{security.isin or security.securityName} with sign '(V)' "
-                    "(distribution in the form of shares). Its DA-1 treatment is not "
-                    "implemented. Re-run with --tax-calculation-level fillin to fall "
-                    "back to the income your broker actually reported for this "
-                    "security, and check it by hand."
+                    self._translate("warn_unsupported_payment_reason").format(
+                        date=pay.paymentDate,
+                        identifier=security.isin or security.securityName,
+                    )
                 )
 
             result.append(sec_payment)
