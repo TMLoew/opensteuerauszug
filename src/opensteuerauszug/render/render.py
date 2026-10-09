@@ -2907,12 +2907,35 @@ def _embed_tax_statement_xml(pdf_data: bytes, tax_statement: TaxStatement) -> by
     import a statement directly, so ship both.
     """
     from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import ArrayObject, NameObject, TextStringObject
 
     try:
         xml_bytes = tax_statement.to_xml_bytes()
         reader = PdfReader(io.BytesIO(pdf_data))
         writer = PdfWriter(clone_from=reader)
-        writer.add_attachment(f"{tax_statement.id or 'taxstatement'}.xml", xml_bytes)
+        embedded = writer.add_attachment(f"{tax_statement.id or 'taxstatement'}.xml", xml_bytes)
+
+        # A bare attachment is a blob of unknown type. Importers look for the
+        # statement by media type and by the file being *associated* with the
+        # document, so say both: /Subtype gives it a MIME type, /AFRelationship
+        # plus the catalogue's /AF array mark it as this document's data rather
+        # than an incidental enclosure.
+        embedded.subtype = NameObject("/application#2Fxml")
+        embedded.associated_file_relationship = NameObject("/Data")
+        embedded.description = TextStringObject("eCH-0196 Steuerauszug (XML)")
+        root = writer._root_object
+        af = root.get(NameObject("/AF"))
+        if not isinstance(af, ArrayObject):
+            af = ArrayObject()
+            root[NameObject("/AF")] = af
+        ref = embedded.pdf_object.indirect_reference
+        af.append(ref if ref is not None else embedded.pdf_object)
+
+        # Embedded files were introduced in PDF 1.4 and associated files in 1.7;
+        # ReportLab emits 1.3, and a reader that honours the declared version is
+        # entitled to ignore everything above.
+        writer.pdf_header = "%PDF-1.7"
+
         out = io.BytesIO()
         writer.write(out)
         return out.getvalue()
