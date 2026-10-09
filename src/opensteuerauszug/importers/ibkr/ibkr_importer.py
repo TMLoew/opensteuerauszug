@@ -2,7 +2,7 @@ import os
 import logging
 from typing import Final, List, Any, Dict, Optional, Sequence
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -1135,6 +1135,35 @@ class IbkrImporter:
                     if getattr(open_pos, 'positionValue', None) is not None:
                         pos_value = self._to_decimal(
                             open_pos.positionValue, 'positionValue', f"OpenPosition {symbol}"
+                        )
+
+                    if mark_price is None and pos_value is not None and quantity:
+                        # Flex exports often carry positionValue without markPrice.
+                        # Their quotient is the broker's own year-end mark, and it
+                        # already includes any contract multiplier, exactly as the
+                        # multiplied markPrice above would.
+                        #
+                        # This matters for securities the Kursliste does not list:
+                        # the Kursliste path sets unitPrice itself, so without this
+                        # those positions reach the Wertschriftenverzeichnis with a
+                        # quantity and a total but no price per unit, and the line
+                        # cannot be checked by whoever reads it.
+                        # Rounded: the quotient of two rounded figures repeats
+                        # (5'807.58 / 13'050 = 0.4450252873...), and printing
+                        # twenty digits on a tax document claims a precision
+                        # that is not there. Six is finer than any equity is
+                        # quoted and keeps price x quantity within a cent of
+                        # the broker's own total.
+                        mark_price = (pos_value / quantity).quantize(
+                            Decimal("0.000001"), rounding=ROUND_HALF_UP
+                        )
+                        logger.info(
+                            "OpenPosition %s: no markPrice in the export; using the broker's "
+                            "own %s / %s = %s as the year-end unit price.",
+                            symbol,
+                            pos_value,
+                            quantity,
+                            mark_price,
                         )
 
                     balance_stock = SecurityStock(
